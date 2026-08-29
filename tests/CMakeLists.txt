@@ -1,0 +1,11 @@
+project(tests)
+enable_testing()
+
+add_executable(test_chunker test_chunker.cpp)
+target_link_libraries(test_chunker switchml)
+
+add_executable(test_packet_parse test_packet_parse.cpp)
+target_link_libraries(test_packet_parse switchml)
+
+add_test(NAME ChunkerTest COMMAND test_chunker)
+add_test(NAME PacketParseTest COMMAND test_packet_parse)
