@@ -1,7 +1,8 @@
 CLANG ?= clang
 CFLAGS = -O2 -g -target bpf -D__TARGET_ARCH_x86 \
          -I/usr/include/x86_64-linux-gnu \
-         -I/usr/lib/llvm-14/include
+         -I/usr/lib/llvm-14/include \
+         -I/usr/include/bpf
 
 all: aggregator.bpf.o
 

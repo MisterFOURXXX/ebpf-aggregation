@@ -19,8 +19,8 @@ int main(int argc, char** argv) {
     }
 
     const size_t N = 64;
-    std::vector<float> sendbuf(N, wid + 1.0f);  // Worker 1 sends 1.0, Worker 2 sends 2.0...
-    std::vector<float> recvbuf(N, 0.0f);
+    std::vector<int64_t> sendbuf(N, wid + 1);
+    std::vector<int64_t> recvbuf(N, 0);
 
     if (switchml_allreduce(sendbuf.data(), recvbuf.data(), N) < 0) {
         std::cerr << "AllReduce failed\n";
