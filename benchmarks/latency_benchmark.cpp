@@ -21,7 +21,7 @@ inline bool execute_allreduce_with_backoff(int32_t* __restrict sendbuf,
                                            int32_t* __restrict recvbuf,
                                            size_t num_ints) noexcept {
     int retries = 0;
-    while (retries < 10) {
+    while (retries < 200) { // Increased max retry budget for network convergence
         if (switchml_allreduce(sendbuf, recvbuf, num_ints) == 0)
             return true;
         ++retries;
@@ -33,11 +33,10 @@ inline bool execute_allreduce_with_backoff(int32_t* __restrict sendbuf,
 }
 
 int main(int argc, char** argv) {
-    std::ios_base::sync_with_stdio(false);
     std::cin.tie(nullptr);
 
     if (argc < 6) {
-        std::cerr << "Usage: ./latency_benchmark <ip> <port> <worker_id> <num_ints> <iterations>\n";
+        std::cerr << "Usage: ./latency_benchmark <aggregator_ip> <port> <worker_id> <num_ints> <iterations> [cpu_core]\n";
         return 1;
     }
 
@@ -55,47 +54,48 @@ int main(int argc, char** argv) {
         pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
     }
 
+    std::cout << "[INFO] Worker " << wid << " initializing target " << ip << ":" << port << "..." << std::endl;
+
     if (unlikely(switchml_init(ip, port, wid) < 0)) {
-        std::cerr << "[ERROR] Init failed\n";
+        std::cerr << "[ERROR] Worker " << wid << " init failed!" << std::endl;
         return 1;
     }
 
     std::vector<int32_t> sendbuf(num_ints, 1);
     std::vector<int32_t> recvbuf(num_ints, 0);
-    for (size_t i = 0; i < num_ints; i += 16) {
-        sendbuf[i] = 1;
-        recvbuf[i] = 0;
-        __builtin_prefetch(&sendbuf[i + 16], 0, 3);
-        __builtin_prefetch(&recvbuf[i + 16], 0, 3);
-    }
 
-    for (int i = 0; i < 2; ++i)
-        if (!execute_allreduce_with_backoff(sendbuf.data(), recvbuf.data(), num_ints))
-            std::cerr << "[WARN] warmup " << i << " failed\n";
+    // Reset sequence state before warmup
+    switchml_reset_seq(0);
 
-    switchml_reset_seq(10);
-
-    const auto start = std::chrono::steady_clock::now();
-    auto* allreduce_fn = &switchml_allreduce;
-    for (int i = 0; i < iters; ++i) {
-        if (unlikely((*allreduce_fn)(sendbuf.data(), recvbuf.data(), num_ints) < 0)) {
-            std::cerr << "\n[ERROR] AllReduce failed at iteration " << i << "\n";
+    std::cout << "[INFO] Worker " << wid << " starting warmup..." << std::endl;
+    for (int i = 0; i < 2; ++i) {
+        if (!execute_allreduce_with_backoff(sendbuf.data(), recvbuf.data(), num_ints)) {
+            std::cerr << "[ERROR] Worker " << wid << " warmup " << i << " failed. Aborting." << std::endl;
             switchml_finalize();
             return 1;
         }
-        __builtin_prefetch(sendbuf.data(), 0, 3);
-        __builtin_prefetch(recvbuf.data(), 0, 3);
+    }
+
+    std::cout << "[INFO] Worker " << wid << " starting benchmark (" << iters << " iterations)..." << std::endl;
+
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < iters; ++i) {
+        if (unlikely(!execute_allreduce_with_backoff(sendbuf.data(), recvbuf.data(), num_ints))) {
+            std::cerr << "[ERROR] Worker " << wid << " AllReduce failed at iteration " << i << std::endl;
+            switchml_finalize();
+            return 1;
+        }
     }
     const auto end = std::chrono::steady_clock::now();
 
     const double elapsed_us = std::chrono::duration<double, std::micro>(end - start).count();
     const double avg_latency = elapsed_us / static_cast<double>(iters);
 
-    std::cout << "\n==================================================\n";
-    std::cout << "[SUCCESS] Worker ID: " << wid << "\n";
-    std::cout << "Iterations: " << iters << "\n";
-    std::cout << "Avg Latency: " << avg_latency << " us\n";
-    std::cout << "==================================================\n";
+    std::cout << "\n==================================================\n"
+              << "[SUCCESS] Worker ID: " << wid << "\n"
+              << "Iterations: " << iters << "\n"
+              << "Avg Latency: " << avg_latency << " us\n"
+              << "==================================================" << std::endl;
 
     switchml_finalize();
     return 0;

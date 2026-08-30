@@ -1,10 +1,16 @@
-link_directories(${CMAKE_BINARY_DIR}/client_lib)
+cmake_minimum_required(VERSION 3.16)
+project(switchml_benchmarks CXX C)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Define executables
 add_executable(latency_benchmark latency_benchmark.cpp)
-target_link_libraries(latency_benchmark switchml pthread)
-
 add_executable(cpu_benchmark cpu_benchmark.cpp)
-target_link_libraries(cpu_benchmark switchml pthread)
-
 add_executable(scalability_benchmark scalability_benchmark.cpp)
-target_link_libraries(scalability_benchmark switchml pthread)
+
+# Target-scoped directory discovery and linking
+foreach(target latency_benchmark cpu_benchmark scalability_benchmark)
+    target_link_directories(${target} PRIVATE ${CMAKE_BINARY_DIR}/client_lib)
+    target_link_libraries(${target} PRIVATE switchml pthread)
+endforeach()

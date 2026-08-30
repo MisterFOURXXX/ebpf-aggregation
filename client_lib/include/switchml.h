@@ -17,13 +17,14 @@ int switchml_finalize();
 }
 #endif
 
-// This struct must be packed and match the eBPF definition.
-// All fields are in HOST byte order (little-endian on x86).
+// Packed struct matching eBPF raw packet layout (Host byte order)
+#pragma pack(push, 1)
 struct gradient_hdr {
     uint32_t session_id;
     uint32_t seq_num;
     uint16_t worker_id;
     uint16_t payload_ints;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
-#endif
+#endif // SWITCHML_H

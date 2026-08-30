@@ -22,7 +22,10 @@ extern "C" int switchml_init(const char* ip, int port, int worker_id) {
     g_seq_num = 0;
 
     g_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (g_sockfd < 0) return -1;
+    if (g_sockfd < 0) {
+        std::cerr << "[CLIENT] socket creation failed: " << strerror(errno) << "\n";
+        return -1;
+    }
 
     struct timeval tv;
     tv.tv_sec = 1;
@@ -32,14 +35,20 @@ extern "C" int switchml_init(const char* ip, int port, int worker_id) {
     memset(&g_server_addr, 0, sizeof(g_server_addr));
     g_server_addr.sin_family = AF_INET;
     g_server_addr.sin_port = htons(port);
-    inet_pton(AF_INET, ip, &g_server_addr.sin_addr);
+    if (inet_pton(AF_INET, ip, &g_server_addr.sin_addr) <= 0) {
+        std::cerr << "[CLIENT] Invalid IP: " << ip << "\n";
+        return -1;
+    }
 
     struct sockaddr_in local;
     memset(&local, 0, sizeof(local));
     local.sin_family = AF_INET;
     local.sin_addr.s_addr = INADDR_ANY;
     local.sin_port = 0;
-    bind(g_sockfd, reinterpret_cast<struct sockaddr*>(&local), sizeof(local));
+    if (bind(g_sockfd, reinterpret_cast<struct sockaddr*>(&local), sizeof(local)) < 0) {
+        std::cerr << "[CLIENT] bind failed: " << strerror(errno) << "\n";
+        return -1;
+    }
 
     std::cout << "[CLIENT] Worker " << worker_id << " initialized, target " << ip << ":" << port << "\n";
     return 0;
@@ -50,7 +59,14 @@ extern "C" void switchml_reset_seq(uint32_t new_seq) {
 }
 
 extern "C" int switchml_allreduce(const int32_t* sendbuf, int32_t* recvbuf, size_t count) {
-    if (g_sockfd < 0 || count > MAX_PAYLOAD_INTS) return -1;
+    if (g_sockfd < 0) {
+        std::cerr << "[CLIENT] Socket not initialized\n";
+        return -1;
+    }
+    if (count > MAX_PAYLOAD_INTS) {
+        std::cerr << "[CLIENT] Payload too large: " << count << " (max " << MAX_PAYLOAD_INTS << ")\n";
+        return -1;
+    }
 
     uint8_t packet_buffer[256];
     memset(packet_buffer, 0, sizeof(packet_buffer));
@@ -74,7 +90,9 @@ extern "C" int switchml_allreduce(const int32_t* sendbuf, int32_t* recvbuf, size
                               reinterpret_cast<struct sockaddr*>(&g_server_addr),
                               sizeof(g_server_addr));
         if (sent < 0) {
-            std::cerr << "[CLIENT] sendto error (" << attempts << "): " << strerror(errno) << "\n";
+            std::cerr << "[CLIENT] sendto error (" << attempts << ") to "
+                      << inet_ntoa(g_server_addr.sin_addr) << ":" << ntohs(g_server_addr.sin_port)
+                      << " - " << strerror(errno) << "\n";
             attempts++;
             usleep(5000);
             continue;

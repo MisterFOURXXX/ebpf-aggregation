@@ -6,6 +6,10 @@ from mininet.net import Mininet
 from mininet.cli import CLI
 from mininet.log import setLogLevel, info
 
+def cleanup_interfaces():
+    """Remove any leftover veth interfaces from previous runs."""
+    os.system("ip link show | grep -E 'agg-eth0|s1-eth' | awk -F: '{print $2}' | xargs -r ip link del 2>/dev/null")
+
 def compile_ebpf(project_root):
     ebpf_dir = os.path.join(project_root, "ebpf")
     obj_file = os.path.join(ebpf_dir, "aggregator.bpf.o")
@@ -25,6 +29,10 @@ def create_topology():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
     ebpf_obj = compile_ebpf(project_root)
+
+    # --- CLEANUP: remove stale interfaces ---
+    cleanup_interfaces()
+    info("*** Stale interfaces cleaned up.\n")
 
     net = Mininet()
 
