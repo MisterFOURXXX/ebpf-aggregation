@@ -1,13 +1,6 @@
-project(benchmarks)
+add_library(switchml SHARED src/udp_client.cpp)
+target_include_directories(switchml PUBLIC include)
+target_link_libraries(switchml pthread)
 
-# Link against the switchml client library
-link_directories(${CMAKE_BINARY_DIR}/client_lib)
-
-add_executable(latency_benchmark latency_benchmark.cpp)
-target_link_libraries(latency_benchmark switchml pthread)
-
-add_executable(cpu_benchmark cpu_benchmark.cpp)
-target_link_libraries(cpu_benchmark switchml pthread)
-
-add_executable(scalability_benchmark scalability_benchmark.cpp)
-target_link_libraries(scalability_benchmark switchml pthread)
+install(TARGETS switchml DESTINATION lib)
+install(DIRECTORY include/ DESTINATION include)

@@ -1,24 +1,30 @@
-# controller.py
+#!/usr/bin/env python3
 import yaml
 import time
 import sys
 from ebpf_loader import attach_xdp, detach_xdp, update_config_map
 
 def main():
-    with open("config.yaml", "r") as f:
-        config = yaml.safe_load(f)
+    try:
+        with open("config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+    except FileNotFoundError:
+        print("[ERROR] config.yaml not found. Please create it from the template.")
+        sys.exit(1)
 
     print("=== eBPF-Agg Controller ===")
-    session_id = 0x12345678  # Fixed for MVP
+    interface = config.get("xdp_interface", "eth0")
+    session_id = 0x12345678
+    max_workers = config.get("max_workers", 8)
 
-    # 1. Attach XDP program
-    attach_xdp(config["xdp_interface"])
+    if not attach_xdp(interface, obj_path="ebpf/aggregator.bpf.o"):
+        print("[ERROR] XDP attachment failed. Exiting.")
+        sys.exit(1)
 
-    # 2. Configure the session
-    update_config_map(session_id, config["max_workers"])
+    update_config_map(session_id, max_workers)
 
-    print(f"[Controller] Session {session_id:08x} ready for {config['max_workers']} workers.")
-    print(f"[Controller] Aggregator IP: {config['aggregator_ip']}:{config['aggregator_port']}")
+    print(f"[Controller] Session {session_id:08x} ready for {max_workers} workers.")
+    print(f"[Controller] Aggregator IP: {config.get('aggregator_ip')}:{config.get('aggregator_port')}")
     print("Press Ctrl+C to detach XDP and exit.")
 
     try:
@@ -27,7 +33,7 @@ def main():
     except KeyboardInterrupt:
         print("\n[Controller] Shutting down...")
     finally:
-        detach_xdp(config["xdp_interface"])
+        detach_xdp(interface)
         print("[Controller] Done.")
 
 if __name__ == "__main__":

@@ -1,22 +1,12 @@
-.PHONY: all clean ebpf client benchmarks examples
+.PHONY: all clean ebpf
 
-all: ebpf client benchmarks examples
+all: ebpf
+	mkdir -p build
+	cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc)
 
 ebpf:
 	$(MAKE) -C ebpf
 
-client:
-	$(MAKE) -C client_lib
-
-benchmarks:
-	$(MAKE) -C benchmarks
-
-examples:
-	$(MAKE) -C examples
-
 clean:
 	$(MAKE) -C ebpf clean
-	$(MAKE) -C client_lib clean
-	$(MAKE) -C benchmarks clean
-	$(MAKE) -C examples clean
-	rm -rf build/
+	rm -rf build

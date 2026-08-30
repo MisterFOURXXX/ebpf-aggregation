@@ -1,7 +1,7 @@
 aggregator_ip: "192.168.1.100"
 aggregator_port: 9999
-xdp_interface: "eth0"
-max_workers: 8
-packet_payload_floats: 32   # 128 bytes per packet (float=4 bytes)
+xdp_interface: "agg-eth0"
+max_workers: 4
+packet_payload_floats: 32
 session_timeout_sec: 30
 bpf_map_pin_path: "/sys/fs/bpf/ebpf_agg"

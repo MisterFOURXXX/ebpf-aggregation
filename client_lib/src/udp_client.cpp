@@ -1,103 +1,124 @@
-// udp_client.cpp - integer version
 #include "switchml.h"
+#include <iostream>
+#include <vector>
+#include <cstring>
+#include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/poll.h>
-#include <unistd.h>
-#include <cstring>
-#include <vector>
-#include <iostream>
+#include <errno.h>
 
-static int sockfd = -1;
-static struct sockaddr_in agg_addr;
-static int worker_id = 0;
-static uint32_t session_id = 0x12345678;
-static const size_t MAX_INTS_PER_PKT = 32;  // must match PAYLOAD_INTS
+static int g_sockfd = -1;
+static struct sockaddr_in g_server_addr;
+static int g_worker_id = -1;
+static uint32_t g_seq_num = 0;
+static const uint32_t g_session_id = 0x12345678;
+static const int MAX_RETRIES = 200;          // Increased for reliable tests
+static const size_t MAX_PAYLOAD_INTS = 32;
 
-struct __attribute__((packed)) Packet {
-    uint32_t session_id;
-    uint32_t seq_num;
-    uint16_t worker_id;
-    uint16_t payload_ints;
-    int64_t data[MAX_INTS_PER_PKT];
-};
+extern "C" int switchml_init(const char* ip, int port, int worker_id) {
+    g_worker_id = worker_id;
+    g_seq_num = 0;
 
-extern "C" int switchml_init(const char* ip, int port, int wid) {
-    worker_id = wid;
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) return -1;
+    g_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (g_sockfd < 0) return -1;
 
-    struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    struct timeval tv;
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    setsockopt(g_sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    memset(&agg_addr, 0, sizeof(agg_addr));
-    agg_addr.sin_family = AF_INET;
-    agg_addr.sin_port = htons(port);
-    inet_pton(AF_INET, ip, &agg_addr.sin_addr);
+    memset(&g_server_addr, 0, sizeof(g_server_addr));
+    g_server_addr.sin_family = AF_INET;
+    g_server_addr.sin_port = htons(port);
+    inet_pton(AF_INET, ip, &g_server_addr.sin_addr);
 
     struct sockaddr_in local;
+    memset(&local, 0, sizeof(local));
     local.sin_family = AF_INET;
     local.sin_addr.s_addr = INADDR_ANY;
     local.sin_port = 0;
-    bind(sockfd, (struct sockaddr*)&local, sizeof(local));
+    bind(g_sockfd, reinterpret_cast<struct sockaddr*>(&local), sizeof(local));
 
+    std::cout << "[CLIENT] Worker " << worker_id << " initialized, target " << ip << ":" << port << "\n";
     return 0;
 }
 
-extern "C" int switchml_allreduce(const int64_t* sendbuf, int64_t* recvbuf, size_t count) {
-    if (sockfd < 0) return -1;
+extern "C" void switchml_reset_seq(uint32_t new_seq) {
+    g_seq_num = new_seq;
+}
 
-    size_t num_packets = (count + MAX_INTS_PER_PKT - 1) / MAX_INTS_PER_PKT;
-    std::vector<struct mmsghdr> msgs(num_packets);
-    std::vector<struct iovec> iovs(num_packets);
-    std::vector<Packet> packets(num_packets);
+extern "C" int switchml_allreduce(const int32_t* sendbuf, int32_t* recvbuf, size_t count) {
+    if (g_sockfd < 0 || count > MAX_PAYLOAD_INTS) return -1;
 
-    for (size_t i = 0; i < num_packets; i++) {
-        Packet &pkt = packets[i];
-        pkt.session_id = session_id;
-        pkt.seq_num = i;
-        pkt.worker_id = worker_id;
-        size_t offset = i * MAX_INTS_PER_PKT;
-        size_t remaining = count - offset;
-        pkt.payload_ints = (remaining < MAX_INTS_PER_PKT) ? remaining : MAX_INTS_PER_PKT;
-        memcpy(pkt.data, sendbuf + offset, pkt.payload_ints * sizeof(int64_t));
+    uint8_t packet_buffer[256];
+    memset(packet_buffer, 0, sizeof(packet_buffer));
 
-        iovs[i].iov_base = &pkt;
-        iovs[i].iov_len = sizeof(Packet);
-        msgs[i].msg_hdr.msg_name = &agg_addr;
-        msgs[i].msg_hdr.msg_namelen = sizeof(agg_addr);
-        msgs[i].msg_hdr.msg_iov = &iovs[i];
-        msgs[i].msg_hdr.msg_iovlen = 1;
-    }
+    auto* hdr = reinterpret_cast<struct gradient_hdr*>(packet_buffer);
+    hdr->session_id = g_session_id;
+    hdr->seq_num = g_seq_num;
+    hdr->worker_id = static_cast<uint16_t>(g_worker_id);
+    hdr->payload_ints = static_cast<uint16_t>(count);
 
-    int sent = sendmmsg(sockfd, msgs.data(), num_packets, 0);
-    if (sent < 0) return -1;
+    int32_t* payload_ptr = reinterpret_cast<int32_t*>(hdr + 1);
+    memcpy(payload_ptr, sendbuf, count * sizeof(int32_t));
 
-    size_t received_packets = 0;
-    int retries = 0;
-    while (received_packets < num_packets && retries < 50) {
-        struct pollfd pfd = { .fd = sockfd, .events = POLLIN };
-        if (poll(&pfd, 1, 5) <= 0) { retries++; continue; }
+    size_t packet_size = sizeof(struct gradient_hdr) + (count * sizeof(int32_t));
 
-        Packet reply_pkt;
-        struct sockaddr_in src;
-        socklen_t src_len = sizeof(src);
-        int n = recvfrom(sockfd, &reply_pkt, sizeof(Packet), 0,
-                         (struct sockaddr*)&src, &src_len);
-        if (n < 0) { retries++; continue; }
-        if (reply_pkt.session_id != session_id) continue;
+    int attempts = 0;
+    bool success = false;
 
-        size_t offset = reply_pkt.seq_num * MAX_INTS_PER_PKT;
-        if (offset + reply_pkt.payload_ints <= count) {
-            memcpy(recvbuf + offset, reply_pkt.data,
-                   reply_pkt.payload_ints * sizeof(int64_t));
-            received_packets++;
+    while (attempts < MAX_RETRIES) {
+        ssize_t sent = sendto(g_sockfd, packet_buffer, packet_size, 0,
+                              reinterpret_cast<struct sockaddr*>(&g_server_addr),
+                              sizeof(g_server_addr));
+        if (sent < 0) {
+            std::cerr << "[CLIENT] sendto error (" << attempts << "): " << strerror(errno) << "\n";
+            attempts++;
+            usleep(5000);
+            continue;
         }
+
+        uint8_t response_buffer[256];
+        struct sockaddr_in from_addr;
+        socklen_t from_len = sizeof(from_addr);
+
+        ssize_t received = recvfrom(g_sockfd, response_buffer, sizeof(response_buffer), 0,
+                                    reinterpret_cast<struct sockaddr*>(&from_addr), &from_len);
+        if (received < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                std::cerr << "[CLIENT] recvfrom error (" << attempts << "): " << strerror(errno) << "\n";
+            }
+            attempts++;
+            continue;
+        }
+
+        if (received >= static_cast<ssize_t>(sizeof(struct gradient_hdr))) {
+            auto* resp_hdr = reinterpret_cast<struct gradient_hdr*>(response_buffer);
+            if (resp_hdr->session_id == g_session_id && resp_hdr->seq_num == g_seq_num) {
+                int32_t* resp_payload = reinterpret_cast<int32_t*>(resp_hdr + 1);
+                memcpy(recvbuf, resp_payload, count * sizeof(int32_t));
+                success = true;
+                break;
+            }
+        }
+        attempts++;
     }
-    return (received_packets == num_packets) ? 0 : -1;
+
+    if (!success) {
+        std::cerr << "[CLIENT] AllReduce failed after " << MAX_RETRIES << " attempts (seq " << g_seq_num << ")\n";
+        return -1;
+    }
+
+    g_seq_num++;
+    return 0;
 }
 
 extern "C" int switchml_finalize() {
-    if (sockfd >= 0) close(sockfd);
+    if (g_sockfd >= 0) {
+        close(g_sockfd);
+        g_sockfd = -1;
+    }
     return 0;
 }
