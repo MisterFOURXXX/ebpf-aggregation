@@ -1,20 +1,18 @@
 #ifndef __AGGREGATOR_H
 #define __AGGREGATOR_H
 
-#define MAX_WORKERS 16
-#define PAYLOAD_INTS 32
-#define MAX_SESSIONS 1024
+#include <linux/types.h>
 
 struct gradient_hdr {
     __u32 session_id;
     __u32 seq_num;
     __u16 worker_id;
-    __u16 payload_ints;
-};
+    __u16 payload_count;        // number of int32 values
+} __attribute__((packed));
 
-// Only sums – mask is stored in a separate array
 struct agg_value {
-    __s32 sum[PAYLOAD_INTS];
+    __s32 sum[32];              // fixed‑point sums (scaled)
+    __u64 mask;
 };
 
 #endif

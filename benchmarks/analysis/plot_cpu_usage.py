@@ -1,17 +1,23 @@
-# plot_cpu_usage.py
+#!/usr/bin/env python3
 import matplotlib.pyplot as plt
-import numpy as np
+import pandas as pd
 
-labels = ['eBPF-Agg', 'Standard UDP', 'NCCL']
-cpu_usage = [5, 72, 45]  # Example data
+def generate_plot(csv_file="cpu_results.csv"):
+    # Assume csv with columns: mode, cpu_usage
+    try:
+        df = pd.read_csv(csv_file)
+        modes = df['mode']
+        usage = df['cpu_usage']
+        plt.bar(modes, usage)
+        plt.ylabel('CPU Usage (%)')
+        plt.title('CPU Utilization Comparison')
+        plt.savefig('cpu_plot.png')
+    except FileNotFoundError:
+        print("Demo data: eBPF=4.5%, UDP=72%")
+        plt.bar(['eBPF', 'UDP'], [4.5, 72])
+        plt.ylabel('CPU Usage (%)')
+        plt.title('CPU Utilization (Illustrative)')
+        plt.savefig('cpu_plot.png')
 
-plt.figure(figsize=(8, 5))
-bars = plt.bar(labels, cpu_usage, color=['#2ecc71', '#e74c3c', '#f39c12'])
-plt.ylabel('CPU Utilization (%)')
-plt.title('Aggregator CPU Usage During AllReduce (64MB)')
-plt.ylim(0, 100)
-for bar, val in zip(bars, cpu_usage):
-    plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2, f'{val}%', ha='center')
-plt.grid(axis='y', linestyle='--', alpha=0.7)
-plt.savefig('cpu_usage_comparison.png', dpi=150)
-print("Saved cpu_usage_comparison.png")
+if __name__ == "__main__":
+    generate_plot()

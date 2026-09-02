@@ -1,142 +1,128 @@
-#include "switchml.h"
-#include <iostream>
-#include <vector>
+#include "../include/switchml.h"
+#include "../include/chunker.h"
 #include <cstring>
-#include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <sys/time.h>
-#include <sys/poll.h>
-#include <errno.h>
+#include <unistd.h>
+#include <poll.h>
+#include <vector>
+#include <mutex>
+#include <chrono>
+#include <iostream>
+#include <atomic>
 
-static int g_sockfd = -1;
-static struct sockaddr_in g_server_addr;
-static int g_worker_id = -1;
-static uint32_t g_seq_num = 0;
-static const uint32_t g_session_id = 0x12345678;
-static const int MAX_RETRIES = 200;          // Increased for reliable tests
-static const size_t MAX_PAYLOAD_INTS = 32;
+static int sockfd = -1;
+static struct sockaddr_in agg_addr;
+static uint32_t session_id = 0;
+static uint16_t worker_id = 0;
+static std::atomic<bool> initialized{false};
 
-extern "C" int switchml_init(const char* ip, int port, int worker_id) {
-    g_worker_id = worker_id;
-    g_seq_num = 0;
+struct Packet {
+    uint8_t header[12];
+    int32_t data[32];
+};
 
-    g_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (g_sockfd < 0) {
-        std::cerr << "[CLIENT] socket creation failed: " << strerror(errno) << "\n";
+extern "C" int switchml_init(const char* ip, int port, int wid, uint32_t sid) {
+    if (initialized.exchange(true)) {
+        switchml_finalize();
+    }
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) return -1;
+
+    memset(&agg_addr, 0, sizeof(agg_addr));
+    agg_addr.sin_family = AF_INET;
+    agg_addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, ip, &agg_addr.sin_addr) <= 0) {
+        close(sockfd);
         return -1;
     }
-
-    struct timeval tv;
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    setsockopt(g_sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    memset(&g_server_addr, 0, sizeof(g_server_addr));
-    g_server_addr.sin_family = AF_INET;
-    g_server_addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, ip, &g_server_addr.sin_addr) <= 0) {
-        std::cerr << "[CLIENT] Invalid IP: " << ip << "\n";
-        return -1;
-    }
-
-    struct sockaddr_in local;
-    memset(&local, 0, sizeof(local));
-    local.sin_family = AF_INET;
-    local.sin_addr.s_addr = INADDR_ANY;
-    local.sin_port = 0;
-    if (bind(g_sockfd, reinterpret_cast<struct sockaddr*>(&local), sizeof(local)) < 0) {
-        std::cerr << "[CLIENT] bind failed: " << strerror(errno) << "\n";
-        return -1;
-    }
-
-    std::cout << "[CLIENT] Worker " << worker_id << " initialized, target " << ip << ":" << port << "\n";
+    worker_id = (uint16_t)wid;
+    session_id = sid;
     return 0;
 }
 
-extern "C" void switchml_reset_seq(uint32_t new_seq) {
-    g_seq_num = new_seq;
-}
+extern "C" int switchml_allreduce(const float* sendbuf, float* recvbuf, size_t count) {
+    if (!initialized || sockfd < 0) return -1;
 
-extern "C" int switchml_allreduce(const int32_t* sendbuf, int32_t* recvbuf, size_t count) {
-    if (g_sockfd < 0) {
-        std::cerr << "[CLIENT] Socket not initialized\n";
-        return -1;
-    }
-    if (count > MAX_PAYLOAD_INTS) {
-        std::cerr << "[CLIENT] Payload too large: " << count << " (max " << MAX_PAYLOAD_INTS << ")\n";
-        return -1;
+    const int SCALE = 1000;
+    std::vector<int32_t> send_int(count);
+    for (size_t i = 0; i < count; ++i) {
+        send_int[i] = (int32_t)(sendbuf[i] * SCALE + 0.5f);
     }
 
-    uint8_t packet_buffer[256];
-    memset(packet_buffer, 0, sizeof(packet_buffer));
+    std::vector<Chunk> chunks = split_tensor(count);
+    size_t num_packets = chunks.size();
+    std::vector<Packet> packets(num_packets);
 
-    auto* hdr = reinterpret_cast<struct gradient_hdr*>(packet_buffer);
-    hdr->session_id = g_session_id;
-    hdr->seq_num = g_seq_num;
-    hdr->worker_id = static_cast<uint16_t>(g_worker_id);
-    hdr->payload_ints = static_cast<uint16_t>(count);
+    for (size_t i = 0; i < num_packets; ++i) {
+        auto& pkt = packets[i];
+        pack_chunk(send_int.data(), chunks[i].offset, chunks[i].num_ints,
+                   pkt.header, session_id, (uint32_t)i, worker_id);
+        memcpy(pkt.data,
+               send_int.data() + chunks[i].offset,
+               chunks[i].num_ints * sizeof(int32_t));
+    }
 
-    int32_t* payload_ptr = reinterpret_cast<int32_t*>(hdr + 1);
-    memcpy(payload_ptr, sendbuf, count * sizeof(int32_t));
+    for (size_t i = 0; i < num_packets; ++i) {
+        size_t total_len = 12 + chunks[i].num_ints * sizeof(int32_t);
+        if (sendto(sockfd, &packets[i], total_len, 0,
+                   (struct sockaddr*)&agg_addr, sizeof(agg_addr)) < 0) {
+            return -1;
+        }
+    }
 
-    size_t packet_size = sizeof(struct gradient_hdr) + (count * sizeof(int32_t));
+    std::vector<int32_t> accum_ints(count, 0);
+    std::vector<bool> received(num_packets, false);
+    struct pollfd pfd = { .fd = sockfd, .events = POLLIN };
+    int retries = 0;
+    const int max_retries = 50;
 
-    int attempts = 0;
-    bool success = false;
+    while (true) {
+        bool all_done = true;
+        for (bool r : received) if (!r) { all_done = false; break; }
+        if (all_done) break;
 
-    while (attempts < MAX_RETRIES) {
-        ssize_t sent = sendto(g_sockfd, packet_buffer, packet_size, 0,
-                              reinterpret_cast<struct sockaddr*>(&g_server_addr),
-                              sizeof(g_server_addr));
-        if (sent < 0) {
-            std::cerr << "[CLIENT] sendto error (" << attempts << ") to "
-                      << inet_ntoa(g_server_addr.sin_addr) << ":" << ntohs(g_server_addr.sin_port)
-                      << " - " << strerror(errno) << "\n";
-            attempts++;
-            usleep(5000);
+        int ret = poll(&pfd, 1, 1);
+        if (ret < 0) return -1;
+        if (ret == 0) {
+            retries++;
+            if (retries > max_retries) return -1;
             continue;
         }
 
-        uint8_t response_buffer[256];
-        struct sockaddr_in from_addr;
-        socklen_t from_len = sizeof(from_addr);
+        Packet reply;
+        struct sockaddr_in src;
+        socklen_t src_len = sizeof(src);
+        int n = recvfrom(sockfd, &reply, sizeof(Packet), MSG_DONTWAIT,
+                         (struct sockaddr*)&src, &src_len);
+        if (n < 12) continue;
 
-        ssize_t received = recvfrom(g_sockfd, response_buffer, sizeof(response_buffer), 0,
-                                    reinterpret_cast<struct sockaddr*>(&from_addr), &from_len);
-        if (received < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                std::cerr << "[CLIENT] recvfrom error (" << attempts << "): " << strerror(errno) << "\n";
-            }
-            attempts++;
-            continue;
-        }
+        uint32_t r_session, r_seq;
+        uint16_t r_worker, r_payload;
+        memcpy(&r_session, reply.header, 4);
+        memcpy(&r_seq, reply.header + 4, 4);
+        memcpy(&r_worker, reply.header + 8, 2);
+        memcpy(&r_payload, reply.header + 10, 2);
 
-        if (received >= static_cast<ssize_t>(sizeof(struct gradient_hdr))) {
-            auto* resp_hdr = reinterpret_cast<struct gradient_hdr*>(response_buffer);
-            if (resp_hdr->session_id == g_session_id && resp_hdr->seq_num == g_seq_num) {
-                int32_t* resp_payload = reinterpret_cast<int32_t*>(resp_hdr + 1);
-                memcpy(recvbuf, resp_payload, count * sizeof(int32_t));
-                success = true;
-                break;
-            }
+        if (r_session != session_id || r_seq >= num_packets) continue;
+
+        if (!received[r_seq]) {
+            size_t offset = chunks[r_seq].offset;
+            memcpy(accum_ints.data() + offset, reply.data, r_payload * sizeof(int32_t));
+            received[r_seq] = true;
+            retries = 0;
         }
-        attempts++;
     }
 
-    if (!success) {
-        std::cerr << "[CLIENT] AllReduce failed after " << MAX_RETRIES << " attempts (seq " << g_seq_num << ")\n";
-        return -1;
+    for (size_t i = 0; i < count; ++i) {
+        recvbuf[i] = (float)accum_ints[i] / SCALE;
     }
-
-    g_seq_num++;
     return 0;
 }
 
 extern "C" int switchml_finalize() {
-    if (g_sockfd >= 0) {
-        close(g_sockfd);
-        g_sockfd = -1;
-    }
+    if (sockfd >= 0) close(sockfd);
+    sockfd = -1;
+    initialized = false;
     return 0;
 }

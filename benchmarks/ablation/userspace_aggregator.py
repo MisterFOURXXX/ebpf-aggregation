@@ -6,28 +6,26 @@ UDP_IP = "0.0.0.0"
 UDP_PORT = 9999
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((UDP_IP, UDP_PORT))
-print("[Userspace Aggregator] Running on port 9999 (CPU-intensive)")
+print("Userspace aggregator running on port 9999 (CPU-intensive)")
 
 storage = {}
+EXPECTED_WORKERS = 8
 
 while True:
     data, addr = sock.recvfrom(2048)
     if len(data) < 12:
         continue
-    session_id, seq_num, worker_id, payload_ints = struct.unpack("<IIHH", data[:12])
-    payload = struct.unpack(f"<{payload_ints}i", data[12:12+payload_ints*4])
-
+    session_id, seq_num, worker_id, payload_floats = struct.unpack("<IIHH", data[:12])
+    payload = struct.unpack(f"<{payload_floats}f", data[12:12+payload_floats*4])
     key = (session_id, seq_num)
     if key not in storage:
-        storage[key] = {'sum': [0] * payload_ints, 'mask': 0, 'expected': 8}
-
+        storage[key] = {'sum': [0.0]*payload_floats, 'mask': 0}
     entry = storage[key]
-    for i, val in enumerate(payload):
-        entry['sum'][i] += val
+    for i, v in enumerate(payload):
+        entry['sum'][i] += v
     entry['mask'] |= (1 << worker_id)
-
-    if entry['mask'] == (1 << entry['expected']) - 1:
-        reply = struct.pack("<IIHH", session_id, seq_num, 0, payload_ints)
-        reply += struct.pack(f"<{payload_ints}i", *entry['sum'])
+    if entry['mask'] == (1 << EXPECTED_WORKERS) - 1:
+        reply = struct.pack("<IIHH", session_id, seq_num, 0, payload_floats)
+        reply += struct.pack(f"<{payload_floats}f", *entry['sum'])
         sock.sendto(reply, addr)
         del storage[key]

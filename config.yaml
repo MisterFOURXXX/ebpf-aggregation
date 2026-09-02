@@ -1,7 +1,10 @@
-aggregator_ip: "192.168.1.100"
-aggregator_port: 9999
-xdp_interface: "agg-eth0"
-max_workers: 4
-packet_payload_floats: 32
-session_timeout_sec: 30
-bpf_map_pin_path: "/sys/fs/bpf/ebpf_agg"
+aggregator:
+  ip: "192.168.1.100"
+  port: 9999
+  max_workers: 16
+  packet_payload_floats: 32
+  session_timeout_sec: 30
+  bpf_map_pin_path: "/sys/fs/bpf/ebpf_agg"
+
+bpfd:
+  grpc_address: "bpfd.bpfd.svc:50051"

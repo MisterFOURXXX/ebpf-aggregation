@@ -1,15 +1,11 @@
 CLANG ?= clang
-CFLAGS = -O2 -g -target bpf -D__TARGET_ARCH_x86 \
-         -I/usr/include/x86_64-linux-gnu \
-         -I/usr/lib/llvm-14/include \
-         -I/usr/include/bpf \
-         -I/usr/include/linux \
-         -I.
+ARCH := $(shell uname -m | sed 's/x86_64/x86/')
+CFLAGS := -target bpf -D__TARGET_ARCH_$(ARCH) -I/usr/include/$(ARCH)-linux-gnu -O2 -g
 
 all: aggregator.bpf.o
 
-aggregator.bpf.o: aggregator.bpf.c aggregator.h
+aggregator.bpf.o: aggregator.bpf.c aggregator.h maps_config.h
 	$(CLANG) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f *.o *.ll
+	rm -f *.o

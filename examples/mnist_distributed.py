@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# mnist_distributed.py - Full PyTorch distributed training with eBPF-Agg
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,10 +7,8 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 import os
 import sys
-
-# Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ml_integration.pytorch_hook import patch_allreduce
+from ml_integration import patch_allreduce
 
 class SimpleCNN(nn.Module):
     def __init__(self):
@@ -26,19 +23,16 @@ class SimpleCNN(nn.Module):
         return self.fc(x)
 
 def train(rank, world_size):
-    # Patch PyTorch's all_reduce to use eBPF-Agg
     patch_allreduce()
-    
     dist.init_process_group("gloo", rank=rank, world_size=world_size)
     model = DDP(SimpleCNN().float())
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     criterion = nn.CrossEntropyLoss()
-    
-    # Dummy data for demonstration
-    for epoch in range(5):
-        for step in range(10):
-            inputs = torch.randn(32, 1, 28, 28)
-            labels = torch.randint(0, 10, (32,))
+
+    for epoch in range(2):
+        for step in range(5):
+            inputs = torch.randn(8, 1, 28, 28)
+            labels = torch.randint(0, 10, (8,))
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, labels)

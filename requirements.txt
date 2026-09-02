@@ -1,5 +1,5 @@
 pyyaml
 matplotlib
 pandas
-mininet
 torch
+torchvision

@@ -1,29 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/bpf.h>
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_endian.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
+#include <linux/in.h>
 #include <linux/udp.h>
+#include <linux/types.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_endian.h>
 #include "aggregator.h"
-
-// Debug macro – enabled by -DDEBUG
-#ifdef DEBUG
-#define debug_print(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)
-#else
-#define debug_print(fmt, ...)
-#endif
+#include "maps_config.h"
 
 char LICENSE[] SEC("license") = "GPL";
 
 struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
-    __uint(key_size, sizeof(__u32));
-    __uint(value_size, sizeof(struct agg_value));
-} scratch_map SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
     __uint(max_entries, 1000000);
     __uint(key_size, sizeof(__u64));
     __uint(value_size, sizeof(struct agg_value));
@@ -31,33 +21,23 @@ struct {
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 65536);
+    __uint(max_entries, 1);
     __uint(key_size, sizeof(__u32));
     __uint(value_size, sizeof(__u64));
-} mask_array SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, MAX_SESSIONS);
-    __uint(key_size, sizeof(__u32));
-    __uint(value_size, sizeof(__u32));
-} config_map SEC(".maps");
+} session_counter SEC(".maps");
 
 SEC("xdp")
-int gradient_aggregator(struct xdp_md *ctx) {
-    void *data = (void *)(long)ctx->data;
+int xdp_aggregator(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
-
-    debug_print("XDP: packet received\n");
+    void *data = (void *)(long)ctx->data;
 
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end) return XDP_PASS;
+    if (eth->h_proto != bpf_htons(ETH_P_IP)) return XDP_PASS;
 
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end) return XDP_PASS;
-
-    if (ip->protocol != 17) return XDP_PASS;
-    debug_print("XDP: UDP packet\n");
+    if (ip->protocol != IPPROTO_UDP) return XDP_PASS;
 
     struct udphdr *udp = (void *)(ip + 1);
     if ((void *)(udp + 1) > data_end) return XDP_PASS;
@@ -65,93 +45,39 @@ int gradient_aggregator(struct xdp_md *ctx) {
     struct gradient_hdr *hdr = (void *)(udp + 1);
     if ((void *)(hdr + 1) > data_end) return XDP_PASS;
 
-    __u32 *expected = bpf_map_lookup_elem(&config_map, &hdr->session_id);
-    if (!expected) {
-        debug_print("XDP: config_map lookup failed for session %u\n", hdr->session_id);
-        return XDP_DROP;
-    }
-    debug_print("XDP: expected workers = %u\n", *expected);
-
-    __u64 map_key = ((__u64)hdr->session_id << 32) | hdr->seq_num;
-
-    // ---- Sums ----
-    struct agg_value *val = bpf_map_lookup_elem(&agg_map, &map_key);
-    if (!val) {
-        __u32 zero = 0;
-        struct agg_value *init = bpf_map_lookup_elem(&scratch_map, &zero);
-        if (!init) return XDP_DROP;
-
-        #pragma unroll
-        for (int i = 0; i < PAYLOAD_INTS; i++)
-            init->sum[i] = 0;
-
-        if (bpf_map_update_elem(&agg_map, &map_key, init, BPF_NOEXIST) < 0)
-            return XDP_DROP;
-
-        val = bpf_map_lookup_elem(&agg_map, &map_key);
-        if (!val) return XDP_DROP;
-    }
+    __u32 session_id = hdr->session_id;
+    __u32 seq_num = hdr->seq_num;
+    __u16 worker_id = hdr->worker_id;
+    __u16 payload_count = hdr->payload_count;
+    if (payload_count > PAYLOAD_FLOATS) return XDP_PASS;
 
     __s32 *payload = (__s32 *)(hdr + 1);
-    __u16 count = hdr->payload_ints;
-    if (count > PAYLOAD_INTS) count = PAYLOAD_INTS;
+    if ((void *)(payload + payload_count) > data_end) return XDP_PASS;
 
-    if ((void *)(payload + count) > data_end) return XDP_DROP;
+    __u64 key = ((__u64)session_id << 32) | seq_num;
 
-    #pragma unroll
-    for (int i = 0; i < PAYLOAD_INTS; i++) {
-        if (i < count) {
-            if ((void *)&payload[i + 1] <= data_end) {
-                val->sum[i] += payload[i];
-            }
-        }
+    struct agg_value *val = bpf_map_lookup_elem(&agg_map, &key);
+    if (!val) {
+        struct agg_value new_val = {0};
+        if (bpf_map_update_elem(&agg_map, &key, &new_val, BPF_NOEXIST) < 0)
+            return XDP_PASS;
+        val = bpf_map_lookup_elem(&agg_map, &key);
+        if (!val) return XDP_PASS;
     }
 
-    // ---- Mask (array) ----
-    __u32 idx = hdr->seq_num & 0xFFFF;
-    __u64 *mask_ptr = bpf_map_lookup_elem(&mask_array, &idx);
-    if (!mask_ptr) {
-        debug_print("XDP: mask_array lookup failed for idx %u\n", idx);
-        return XDP_DROP;
+    for (int i = 0; i < payload_count; i++) {
+        val->sum[i] += payload[i];
     }
+    val->mask |= (1ULL << worker_id);
 
-    __u64 mask_bit = 1ULL << (hdr->worker_id & 31);
-    __u64 old_mask = __sync_fetch_and_or(mask_ptr, mask_bit);
-    __u64 new_mask = old_mask | mask_bit;
-
-    debug_print("XDP: worker %u, seq %u, old_mask %llu, new_mask %llu\n",
-                hdr->worker_id, hdr->seq_num, old_mask, new_mask);
-
-    __u32 expected_mask = (1ULL << (*expected & 31)) - 1;
-    debug_print("XDP: expected_mask = %u\n", expected_mask);
-
-    if (new_mask == expected_mask) {
-        debug_print("XDP: All workers arrived, sending reply\n");
-        // Build reply
-        __s32 *reply_payload = (__s32 *)(hdr + 1);
-        #pragma unroll
-        for (int i = 0; i < PAYLOAD_INTS; i++) {
-            if (i < count) {
-                if ((void *)&reply_payload[i + 1] <= data_end) {
-                    reply_payload[i] = val->sum[i];
-                }
-            }
-        }
-
-        // Swap MACs
-        __u8 tmp_mac[6];
-        __builtin_memcpy(tmp_mac, eth->h_dest, 6);
-        __builtin_memcpy(eth->h_dest, eth->h_source, 6);
-        __builtin_memcpy(eth->h_source, tmp_mac, 6);
-
-        // Clean up
-        bpf_map_delete_elem(&agg_map, &map_key);
-        __u64 zero_mask = 0;
-        bpf_map_update_elem(&mask_array, &idx, &zero_mask, BPF_ANY);
-
+    __u64 expected_mask = (1ULL << MAX_WORKERS) - 1;
+    if (val->mask == expected_mask) {
+        bpf_map_delete_elem(&agg_map, &key);
+        __u32 zero = 0;
+        __u64 *cnt = bpf_map_lookup_elem(&session_counter, &zero);
+        if (cnt) (*cnt)++;
         return XDP_TX;
     }
 
-    debug_print("XDP: not all workers yet, dropping packet\n");
-    return XDP_DROP;
+    return XDP_PASS;
 }

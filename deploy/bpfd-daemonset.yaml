@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: bpfd
+  namespace: bpfd
+spec:
+  selector:
+    matchLabels:
+      app: bpfd
+  template:
+    metadata:
+      labels:
+        app: bpfd
+    spec:
+      hostNetwork: true
+      containers:
+      - name: bpfd
+        image: quay.io/bpfd/bpfd:latest
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: bpf
+          mountPath: /sys/fs/bpf
+        - name: libmodules
+          mountPath: /lib/modules
+          readOnly: true
+        args:
+        - --interface=eth0
+      volumes:
+      - name: bpf
+        hostPath:
+          path: /sys/fs/bpf
+      - name: libmodules
+        hostPath:
+          path: /lib/modules

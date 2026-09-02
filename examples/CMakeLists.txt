@@ -1,19 +1,10 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.10)
+project(examples)
 
-# 1. Define the executable target FIRST
+get_filename_component(PROJECT_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/.. ABSOLUTE)
+set(CLIENT_LIB_DIR ${PROJECT_ROOT}/client_lib/build)
+link_directories(${CLIENT_LIB_DIR})
+include_directories(${PROJECT_ROOT}/client_lib/include)
+
 add_executable(simple_allreduce simple_allreduce.cc)
-
-# 2. Find required packages
-find_package(Threads REQUIRED)
-
-# 3. Link libraries to the defined target
-target_link_libraries(simple_allreduce 
-    PRIVATE 
-        switchml 
-        Threads::Threads
-)
-
-# 4. Set the output directory so the binary lands in build/examples/
-set_target_properties(simple_allreduce PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/examples"
-)
+target_link_libraries(simple_allreduce switchml pthread)
