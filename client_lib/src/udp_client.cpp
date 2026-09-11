@@ -10,6 +10,7 @@
 #include <chrono>
 #include <iostream>
 #include <atomic>
+#include <cmath>
 
 static int sockfd = -1;
 static struct sockaddr_in agg_addr;
@@ -17,10 +18,17 @@ static uint32_t session_id = 0;
 static uint16_t worker_id = 0;
 static std::atomic<bool> initialized{false};
 
+// Packet structure matches MAX_INTS_PER_PKT=64
 struct Packet {
     uint8_t header[12];
-    int32_t data[32];
+    int32_t data[64];  // Must match MAX_INTS_PER_PKT
 };
+
+static inline size_t count_received(const std::vector<bool>& received) {
+    size_t count = 0;
+    for (bool r : received) if (r) count++;
+    return count;
+}
 
 extern "C" int switchml_init(const char* ip, int port, int wid, uint32_t sid) {
     if (initialized.exchange(true)) {
@@ -63,6 +71,7 @@ extern "C" int switchml_allreduce(const float* sendbuf, float* recvbuf, size_t c
                chunks[i].num_ints * sizeof(int32_t));
     }
 
+    // Send all packets
     for (size_t i = 0; i < num_packets; ++i) {
         size_t total_len = 12 + chunks[i].num_ints * sizeof(int32_t);
         if (sendto(sockfd, &packets[i], total_len, 0,
@@ -71,11 +80,14 @@ extern "C" int switchml_allreduce(const float* sendbuf, float* recvbuf, size_t c
         }
     }
 
+    // Receive replies with adaptive timeout
     std::vector<int32_t> accum_ints(count, 0);
     std::vector<bool> received(num_packets, false);
     struct pollfd pfd = { .fd = sockfd, .events = POLLIN };
     int retries = 0;
-    const int max_retries = 50;
+    int max_retries = 500 + (int)(num_packets * 2);
+    if (max_retries < 1000) max_retries = 1000;
+    if (max_retries > 5000) max_retries = 5000;
 
     while (true) {
         bool all_done = true;
@@ -86,7 +98,11 @@ extern "C" int switchml_allreduce(const float* sendbuf, float* recvbuf, size_t c
         if (ret < 0) return -1;
         if (ret == 0) {
             retries++;
-            if (retries > max_retries) return -1;
+            if (retries > max_retries) {
+                std::cerr << "Timeout after " << max_retries << " retries, "
+                          << (num_packets - count_received(received)) << " packets missing\n";
+                return -1;
+            }
             continue;
         }
 
@@ -108,9 +124,12 @@ extern "C" int switchml_allreduce(const float* sendbuf, float* recvbuf, size_t c
 
         if (!received[r_seq]) {
             size_t offset = chunks[r_seq].offset;
-            memcpy(accum_ints.data() + offset, reply.data, r_payload * sizeof(int32_t));
-            received[r_seq] = true;
-            retries = 0;
+            size_t copy_bytes = r_payload * sizeof(int32_t);
+            if (offset + r_payload <= count) {
+                memcpy(accum_ints.data() + offset, reply.data, copy_bytes);
+                received[r_seq] = true;
+                retries = 0;
+            }
         }
     }
 

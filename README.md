@@ -15,7 +15,7 @@ bpftool version
 sudo apt install -y linux-tools-generic
 
 
-## 🖥️ Local Validation – Step‑by‑Step
+## Local Validation – Step‑by‑Step
 
 Follow these steps **on your local machine (WSL/Ubuntu)** to ensure everything works **before** moving to Oracle Cloud.
 
@@ -117,7 +117,7 @@ kind delete cluster --name ebpf-p4
 
 ---
 
-## ✅ Final Validation Checklist
+## Final Validation Checklist
 
 | Component | Command | Expected |
 |-----------|---------|----------|
@@ -133,7 +133,7 @@ If all these steps succeed on your **local Linux filesystem**, you can be confid
 
 ---
 
-## 📝 Additional Notes for WSL Users
+## Additional Notes for WSL Users
 
 - Always store the project in `/home/` or `/mnt/wsl/` – avoid `/mnt/c/` to prevent permission issues with CMake.
 - Run `sudo apt install linux-tools-$(uname -r)` to get `bpftool`.
@@ -143,7 +143,7 @@ If all these steps succeed on your **local Linux filesystem**, you can be confid
 Now your repository is fully validated and ready for experiments. Good luck!
 
 
-## 🚀 Step‑by‑Step Local Validation (WSL / Ubuntu)
+## Step‑by‑Step Local Validation (WSL / Ubuntu)
 
 Follow these instructions **exactly** to ensure everything works.
 
@@ -222,7 +222,7 @@ kubectl get gradientaggregations -A
 
 ---
 
-## ✅ Summary of Fixes
+## Summary of Fixes
 
 - **Created `chunker.h`** in `client_lib/include/` and updated includes.
 - **Fixed all CMakeLists.txt** to include correct paths and link libraries.
@@ -237,3 +237,39 @@ Option A: Move to Linux Home (Best)
 cp -r /mnt/c/Users/ADMIN/Documents/GitHub/ebpf-aggregation /root/
 cd /root/ebpf-aggregation
 cd /mnt/c/Users/ADMIN/Documents/GitHub/ebpf-aggregation
+
+```bash
+# 1. Clean everything
+./scripts/clean_all.sh
+make clean
+
+# 2. Build eBPF and client library
+make all
+
+# 3. Verify library location
+ls -la client_lib/build/libswitchml.so
+
+# 4. Set LD_LIBRARY_PATH (now pointing to build/, not build/src/)
+export LD_LIBRARY_PATH=$PWD/client_lib/build:$LD_LIBRARY_PATH
+
+# 5. Build and run tests
+cd tests
+mkdir -p build && cd build
+cmake .. && make
+ctest --output-on-failure
+cd ../..
+
+# 6. Build and run example
+cd examples
+mkdir -p build && cd build
+cmake .. && make
+./simple_allreduce 127.0.0.1 9999 0
+cd ../..
+
+# 7. Build and run benchmarks
+cd benchmarks
+mkdir -p build && cd build
+cmake .. && make
+./latency_benchmark 127.0.0.1 9999 0
+cd ../..
+```
