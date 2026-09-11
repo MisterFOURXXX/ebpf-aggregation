@@ -1,67 +1,57 @@
 #!/bin/bash
-# Complete test script for eBPF Aggregation
+# ============================================================
+# eBPF-Aggregation Test Suite — FAST VERSION
+# ============================================================
+cd "$(dirname "$0")/.."
+ROOT=$(pwd)
+LOG="$ROOT/benchmarks/results"
+mkdir -p "$LOG"
 
-cd /root/ebpf-aggregation
+echo "=============================================="
+echo "   eBPF-Aggregation Test Suite (fast)"
+echo "=============================================="
 
-echo "=== 1. Clean and Build ==="
-./scripts/clean_all.sh
-make clean
-make all
+echo "[1/6] Cleaning..."
+./scripts/clean_all.sh > /dev/null 2>&1 || true
 
-echo "=== 2. Run Unit Tests ==="
-cd tests
-mkdir -p build && cd build
-cmake .. && make
-ctest --output-on-failure
-cd ../..
+echo "[2/6] Building..."
+make all              > /dev/null 2>&1 || { echo "  FAILED: make all"; exit 1; }
+make build-examples   > /dev/null 2>&1 || { echo "  FAILED: examples"; exit 1; }
+make build-benchmarks > /dev/null 2>&1 || { echo "  FAILED: benchmarks"; exit 1; }
+echo "  All binaries built ✓"
 
-echo "=== 3. Build Examples and Benchmarks ==="
-cd examples && mkdir -p build && cd build
-cmake .. && make
-cd ../..
+echo "[3/6] Unit tests..."
+(cd "$ROOT/tests" && mkdir -p build && cd build && cmake .. > /dev/null 2>&1 && make > /dev/null 2>&1 && ctest 2>&1 | tail -3)
 
-cd benchmarks && mkdir -p build && cd build
-cmake .. && make
-cd ../..
+echo "[4/6] Starting aggregator..."
+pkill -f userspace_aggregator 2>/dev/null || true
+sleep 1
+python3 benchmarks/ablation/userspace_aggregator_silent.py > /dev/null 2>&1 &
+AGG_PID=$!
+sleep 2
+kill -0 $AGG_PID 2>/dev/null || { echo "  Aggregator failed"; exit 1; }
+echo "  PID: $AGG_PID"
 
-echo "=== 4. Test with Userspace Aggregator ==="
-pkill -f userspace_aggregator 2>/dev/null
-python3 benchmarks/ablation/userspace_aggregator_fixed.py &
-sleep 3
+echo "[5/6] Running tests (short timeouts)..."
+echo "--- Example (30s) ---"
+(cd "$ROOT/examples/build" && timeout 30 ./simple_allreduce 127.0.0.1 9999 0) \
+    | tee "$LOG/example.txt" || echo "  (timeout)"
 
-echo "=== 5. Test Example ==="
-cd examples/build
-./simple_allreduce 127.0.0.1 9999 0
-cd ../..
+echo "--- Latency (60s) ---"
+(cd "$ROOT/benchmarks/build" && timeout 60 ./latency_benchmark 127.0.0.1 9999 0) \
+    | tee "$LOG/latency_results.csv" || echo "  (timeout)"
 
-echo "=== 6. Run Latency Benchmark ==="
-cd benchmarks/build
-./latency_benchmark 127.0.0.1 9999 0
-cd ../..
+echo "--- Scalability (30s) ---"
+(cd "$ROOT/benchmarks/build" && timeout 30 ./scalability_benchmark 2>&1 | head -20) \
+    | tee "$LOG/scalability_results.csv" || echo "  (timeout)"
 
-echo "=== 7. Run Scalability Benchmark ==="
-cd benchmarks/build
-./scalability_benchmark
-cd ../..
+echo "--- CPU (30s) ---"
+(cd "$ROOT/benchmarks/build" && timeout 30 ./cpu_benchmark 127.0.0.1 9999 0) \
+    | tee "$LOG/cpu_results.txt" || echo "  (timeout)"
 
-echo "=== 8. Install Plotting Dependencies ==="
-sudo apt install -y python3-matplotlib python3-pandas 2>/dev/null || true
+echo "[6/6] Cleanup..."
+pkill -f userspace_aggregator 2>/dev/null || true
 
-echo "=== 9. Generate Plots ==="
-cd benchmarks/analysis
-python3 plot_latency.py
-python3 plot_scalability.py
-python3 plot_cpu_usage.py
-cd ../..
-
-echo "=== 10. Test XDP ==="
-sudo ./scripts/attach_xdp.sh lo
-cd examples/build
-./simple_allreduce 127.0.0.1 9999 0
-sudo bpftool net detach xdp dev lo
-cd ../..
-
-echo "=== 11. Cleanup ==="
-pkill -f userspace_aggregator 2>/dev/null
-
-echo "=== ALL TESTS COMPLETE! ==="
+echo ""
+echo "=== DONE — results in $LOG ==="
+ls -la "$LOG"

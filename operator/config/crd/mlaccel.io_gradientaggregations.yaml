@@ -4,6 +4,13 @@ metadata:
   name: gradientaggregations.mlaccel.io
 spec:
   group: mlaccel.io
+  scope: Namespaced
+  names:
+    plural: gradientaggregations
+    singular: gradientaggregation
+    kind: GradientAggregation
+    shortNames:
+    - ga
   versions:
   - name: v1alpha1
     served: true
@@ -14,41 +21,9 @@ spec:
         properties:
           spec:
             type: object
-            properties:
-              workers:
-                type: integer
-              aggregationMode:
-                type: string
-                enum: ["ebpf-only", "p4-only", "hybrid"]
-              smartNICSelector:
-                type: object
-                properties:
-                  model:
-                    type: string
-              eBPFPolicy:
-                type: object
-                properties:
-                  priority:
-                    type: string
-              metrics:
-                type: array
-                items:
-                  type: string
+            x-kubernetes-preserve-unknown-fields: true
           status:
             type: object
-            properties:
-              phase:
-                type: string
-              bpfProgramLoaded:
-                type: boolean
-              p4ProgramLoaded:
-                type: boolean
-              message:
-                type: string
+            x-kubernetes-preserve-unknown-fields: true
     subresources:
       status: {}
-    scope: Namespaced
-    names:
-      plural: gradientaggregations
-      singular: gradientaggregation
-      kind: GradientAggregation

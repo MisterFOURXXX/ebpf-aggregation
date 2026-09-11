@@ -29,7 +29,7 @@ struct {
 SEC("xdp")
 int xdp_aggregator(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
-    void *data = (void *)(long)ctx->data;
+    void *data     = (void *)(long)ctx->data;
 
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end) return XDP_PASS;
@@ -45,14 +45,17 @@ int xdp_aggregator(struct xdp_md *ctx) {
     struct gradient_hdr *hdr = (void *)(udp + 1);
     if ((void *)(hdr + 1) > data_end) return XDP_PASS;
 
-    __u32 session_id = hdr->session_id;
-    __u32 seq_num = hdr->seq_num;
-    __u16 worker_id = hdr->worker_id;
+    __u32 session_id   = hdr->session_id;
+    __u32 seq_num      = hdr->seq_num;
+    __u16 worker_id    = hdr->worker_id;
     __u16 payload_count = hdr->payload_count;
+
     if (payload_count > PAYLOAD_FLOATS) return XDP_PASS;
 
-    __s32 *payload = (__s32 *)(hdr + 1);
-    if ((void *)(payload + payload_count) > data_end) return XDP_PASS;
+    // Bounded pointer — verifier-friendly
+    __u8 *payload_base = (__u8 *)(hdr + 1);
+    if (payload_base + PAYLOAD_FLOATS * (int)sizeof(__s32) > (__u8 *)data_end)
+        return XDP_PASS;
 
     __u64 key = ((__u64)session_id << 32) | seq_num;
 
@@ -65,9 +68,28 @@ int xdp_aggregator(struct xdp_md *ctx) {
         if (!val) return XDP_PASS;
     }
 
-    for (int i = 0; i < payload_count; i++) {
-        val->sum[i] += payload[i];
-    }
+    // Fully-unrolled, verifier-safe aggregation.
+    // Each block has its own bounds check; no loop state means no verifier loop-limit issue.
+    #define AGG_ONE(I) do { \
+        if ((I) < payload_count) { \
+            __u8 *p = payload_base + (I) * 4; \
+            if (p + 4 <= (__u8 *)data_end) { \
+                __s32 v = *(__s32 *)p; \
+                val->sum[(I)] += v; \
+            } \
+        } \
+    } while (0)
+
+    AGG_ONE(0);  AGG_ONE(1);  AGG_ONE(2);  AGG_ONE(3);
+    AGG_ONE(4);  AGG_ONE(5);  AGG_ONE(6);  AGG_ONE(7);
+    AGG_ONE(8);  AGG_ONE(9);  AGG_ONE(10); AGG_ONE(11);
+    AGG_ONE(12); AGG_ONE(13); AGG_ONE(14); AGG_ONE(15);
+    AGG_ONE(16); AGG_ONE(17); AGG_ONE(18); AGG_ONE(19);
+    AGG_ONE(20); AGG_ONE(21); AGG_ONE(22); AGG_ONE(23);
+    AGG_ONE(24); AGG_ONE(25); AGG_ONE(26); AGG_ONE(27);
+    AGG_ONE(28); AGG_ONE(29); AGG_ONE(30); AGG_ONE(31);
+    #undef AGG_ONE
+
     val->mask |= (1ULL << worker_id);
 
     __u64 expected_mask = (1ULL << MAX_WORKERS) - 1;

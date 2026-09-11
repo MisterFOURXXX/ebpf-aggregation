@@ -6,142 +6,125 @@
 #include <unistd.h>
 #include <poll.h>
 #include <vector>
-#include <mutex>
 #include <chrono>
 #include <iostream>
-#include <atomic>
-#include <cmath>
 
-static int sockfd = -1;
-static struct sockaddr_in agg_addr;
-static uint32_t session_id = 0;
-static uint16_t worker_id = 0;
-static std::atomic<bool> initialized{false};
+// Thread-local state: each thread has its own socket
+thread_local int           t_sockfd      = -1;
+thread_local sockaddr_in   t_agg_addr{};
+thread_local uint32_t      t_session_id  = 0;
+thread_local uint16_t      t_worker_id   = 0;
+thread_local bool          t_initialized = false;
 
-// Packet structure matches MAX_INTS_PER_PKT=64
 struct Packet {
     uint8_t header[12];
-    int32_t data[64];  // Must match MAX_INTS_PER_PKT
+    int32_t data[128];
 };
 
-static inline size_t count_received(const std::vector<bool>& received) {
-    size_t count = 0;
-    for (bool r : received) if (r) count++;
-    return count;
+static inline size_t count_received(const std::vector<bool>& r) {
+    size_t n = 0;
+    for (bool b : r) if (b) n++;
+    return n;
 }
 
 extern "C" int switchml_init(const char* ip, int port, int wid, uint32_t sid) {
-    if (initialized.exchange(true)) {
-        switchml_finalize();
-    }
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) return -1;
+    if (t_initialized) switchml_finalize();
+    t_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (t_sockfd < 0) return -1;
 
-    memset(&agg_addr, 0, sizeof(agg_addr));
-    agg_addr.sin_family = AF_INET;
-    agg_addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, ip, &agg_addr.sin_addr) <= 0) {
-        close(sockfd);
-        return -1;
+    int buf = 32 * 1024 * 1024;
+    setsockopt(t_sockfd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
+    setsockopt(t_sockfd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
+
+    memset(&t_agg_addr, 0, sizeof(t_agg_addr));
+    t_agg_addr.sin_family = AF_INET;
+    t_agg_addr.sin_port   = htons(port);
+    if (inet_pton(AF_INET, ip, &t_agg_addr.sin_addr) <= 0) {
+        close(t_sockfd); t_sockfd = -1; return -1;
     }
-    worker_id = (uint16_t)wid;
-    session_id = sid;
+    t_worker_id = (uint16_t)wid;
+    t_session_id = sid;
+    t_initialized = true;
     return 0;
 }
 
 extern "C" int switchml_allreduce(const float* sendbuf, float* recvbuf, size_t count) {
-    if (!initialized || sockfd < 0) return -1;
-
+    if (!t_initialized || t_sockfd < 0) return -1;
     const int SCALE = 1000;
     std::vector<int32_t> send_int(count);
-    for (size_t i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i)
         send_int[i] = (int32_t)(sendbuf[i] * SCALE + 0.5f);
-    }
 
     std::vector<Chunk> chunks = split_tensor(count);
     size_t num_packets = chunks.size();
     std::vector<Packet> packets(num_packets);
 
     for (size_t i = 0; i < num_packets; ++i) {
-        auto& pkt = packets[i];
         pack_chunk(send_int.data(), chunks[i].offset, chunks[i].num_ints,
-                   pkt.header, session_id, (uint32_t)i, worker_id);
-        memcpy(pkt.data,
-               send_int.data() + chunks[i].offset,
+                   packets[i].header, t_session_id, (uint32_t)i, t_worker_id);
+        memcpy(packets[i].data, send_int.data() + chunks[i].offset,
                chunks[i].num_ints * sizeof(int32_t));
     }
 
-    // Send all packets
     for (size_t i = 0; i < num_packets; ++i) {
-        size_t total_len = 12 + chunks[i].num_ints * sizeof(int32_t);
-        if (sendto(sockfd, &packets[i], total_len, 0,
-                   (struct sockaddr*)&agg_addr, sizeof(agg_addr)) < 0) {
+        size_t len = 12 + chunks[i].num_ints * sizeof(int32_t);
+        if (sendto(t_sockfd, &packets[i], len, 0,
+                   (struct sockaddr*)&t_agg_addr, sizeof(t_agg_addr)) < 0)
             return -1;
-        }
     }
 
-    // Receive replies with adaptive timeout
-    std::vector<int32_t> accum_ints(count, 0);
+    std::vector<int32_t> accum(count, 0);
     std::vector<bool> received(num_packets, false);
-    struct pollfd pfd = { .fd = sockfd, .events = POLLIN };
+    struct pollfd pfd = { .fd = t_sockfd, .events = POLLIN };
     int retries = 0;
-    int max_retries = 500 + (int)(num_packets * 2);
-    if (max_retries < 1000) max_retries = 1000;
-    if (max_retries > 5000) max_retries = 5000;
+    int max_retries = 500 + (int)(num_packets * 3);
+    if (max_retries < 2000) max_retries = 2000;
 
     while (true) {
-        bool all_done = true;
-        for (bool r : received) if (!r) { all_done = false; break; }
-        if (all_done) break;
+        bool done = true;
+        for (bool r : received) if (!r) { done = false; break; }
+        if (done) break;
 
         int ret = poll(&pfd, 1, 1);
         if (ret < 0) return -1;
         if (ret == 0) {
-            retries++;
-            if (retries > max_retries) {
-                std::cerr << "Timeout after " << max_retries << " retries, "
-                          << (num_packets - count_received(received)) << " packets missing\n";
-                return -1;
-            }
+            if (++retries > max_retries) return -1;
             continue;
         }
 
         Packet reply;
         struct sockaddr_in src;
-        socklen_t src_len = sizeof(src);
-        int n = recvfrom(sockfd, &reply, sizeof(Packet), MSG_DONTWAIT,
-                         (struct sockaddr*)&src, &src_len);
+        socklen_t slen = sizeof(src);
+        int n = recvfrom(t_sockfd, &reply, sizeof(Packet), MSG_DONTWAIT,
+                         (struct sockaddr*)&src, &slen);
         if (n < 12) continue;
 
-        uint32_t r_session, r_seq;
-        uint16_t r_worker, r_payload;
-        memcpy(&r_session, reply.header, 4);
-        memcpy(&r_seq, reply.header + 4, 4);
-        memcpy(&r_worker, reply.header + 8, 2);
-        memcpy(&r_payload, reply.header + 10, 2);
+        uint32_t rs, rq;
+        uint16_t rw, rp;
+        memcpy(&rs, reply.header,     4);
+        memcpy(&rq, reply.header + 4, 4);
+        memcpy(&rw, reply.header + 8, 2);
+        memcpy(&rp, reply.header + 10,2);
 
-        if (r_session != session_id || r_seq >= num_packets) continue;
-
-        if (!received[r_seq]) {
-            size_t offset = chunks[r_seq].offset;
-            size_t copy_bytes = r_payload * sizeof(int32_t);
-            if (offset + r_payload <= count) {
-                memcpy(accum_ints.data() + offset, reply.data, copy_bytes);
-                received[r_seq] = true;
+        if (rs != t_session_id || rq >= num_packets) continue;
+        if (!received[rq]) {
+            size_t off = chunks[rq].offset;
+            if (off + rp <= count) {
+                memcpy(accum.data() + off, reply.data, rp * sizeof(int32_t));
+                received[rq] = true;
                 retries = 0;
             }
         }
     }
 
-    for (size_t i = 0; i < count; ++i) {
-        recvbuf[i] = (float)accum_ints[i] / SCALE;
-    }
+    for (size_t i = 0; i < count; ++i)
+        recvbuf[i] = (float)accum[i] / SCALE;
     return 0;
 }
 
 extern "C" int switchml_finalize() {
-    if (sockfd >= 0) close(sockfd);
-    sockfd = -1;
-    initialized = false;
+    if (t_sockfd >= 0) close(t_sockfd);
+    t_sockfd = -1;
+    t_initialized = false;
     return 0;
 }

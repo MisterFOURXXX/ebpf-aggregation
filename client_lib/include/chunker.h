@@ -5,8 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-// 64 ints per packet = 256 bytes payload (better throughput)
-#define MAX_INTS_PER_PKT 16
+#define MAX_INTS_PER_PKT 128
 
 struct Chunk {
     size_t offset;
