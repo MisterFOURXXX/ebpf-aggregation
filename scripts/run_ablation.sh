@@ -1,12 +1,14 @@
 #!/bin/bash
-# Top-level wrapper: build + run entire ablation study
+# ============================================================
+# run_ablation.sh - Build + run the full ablation study
+# ============================================================
 set +m
 set +b
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
 echo "=== Building project ==="
-"$ROOT/scripts/build_all.sh"
+"$ROOT/scripts/build.sh"
 
 echo ""
 echo "=== Running ablation study ==="

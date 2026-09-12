@@ -1,4 +1,7 @@
 #!/bin/bash
+# ============================================================
+# build.sh - Build eBPF, client library, examples, benchmarks, tests
+# ============================================================
 set -e
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
