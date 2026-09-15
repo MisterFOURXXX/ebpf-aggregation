@@ -1,5 +1,9 @@
 IMG ?= ebpf-p4-operator:latest
 
+.PHONY: all build docker-build deploy undeploy clean
+
+all: build
+
 build:
 	go build -o bin/manager main.go
 
@@ -12,8 +16,8 @@ deploy: docker-build
 	kubectl apply -f deploy/operator.yaml
 
 undeploy:
-	kubectl delete -f deploy/operator.yaml
-	kubectl delete -f config/crd/mlaccel.io_gradientaggregations.yaml
+	kubectl delete -f deploy/operator.yaml --ignore-not-found
+	kubectl delete -f config/crd/mlaccel.io_gradientaggregations.yaml --ignore-not-found
 
 clean:
 	rm -rf bin

@@ -1,64 +1,68 @@
 package main
 
 import (
-	"flag"
-	"os"
+    "flag"
+    "os"
 
-	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+    "k8s.io/apimachinery/pkg/runtime"
+    utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+    clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+    ctrl "sigs.k8s.io/controller-runtime"
+    "sigs.k8s.io/controller-runtime/pkg/log/zap"
+    metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	mlaccelv1alpha1 "github.com/your-username/ebpf-p4-agg/operator/api/v1alpha1"
-	"github.com/your-username/ebpf-p4-agg/operator/controllers"
+    mlaccelv1alpha1 "github.com/misterfourxxx/ebpf-aggregation/operator/api/v1alpha1"
+    "github.com/misterfourxxx/ebpf-aggregation/operator/controllers"
 )
 
 var (
-	scheme   = runtime.NewScheme()
-	setupLog = ctrl.Log.WithName("setup")
+    scheme   = runtime.NewScheme()
+    setupLog = ctrl.Log.WithName("setup")
 )
 
 func init() {
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(mlaccelv1alpha1.AddToScheme(scheme))
+    utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+    utilruntime.Must(mlaccelv1alpha1.AddToScheme(scheme))
 }
 
 func main() {
-	var metricsAddr string
-	var enableLeaderElection bool
-	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
-		"Enable leader election for controller manager.")
-	opts := zap.Options{Development: true}
-	opts.BindFlags(flag.CommandLine)
-	flag.Parse()
+    var metricsAddr string
+    var enableLeaderElection bool
+    flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
+        "The address the metric endpoint binds to.")
+    flag.BoolVar(&enableLeaderElection, "leader-elect", false,
+        "Enable leader election for controller manager.")
+    opts := zap.Options{Development: true}
+    opts.BindFlags(flag.CommandLine)
+    flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+    ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		Port:                   9443,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "ebpf-p4-operator.mlaccel.io",
-	})
-	if err != nil {
-		setupLog.Error(err, "unable to start manager")
-		os.Exit(1)
-	}
+    mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+        Scheme: scheme,
+        Metrics: metricsserver.Options{
+            BindAddress: metricsAddr,
+        },
+        LeaderElection:   enableLeaderElection,
+        LeaderElectionID: "ebpf-p4-operator.mlaccel.io",
+    })
+    if err != nil {
+        setupLog.Error(err, "unable to start manager")
+        os.Exit(1)
+    }
 
-	if err = (&controllers.GradientAggregationReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "GradientAggregation")
-		os.Exit(1)
-	}
+    if err = (&controllers.GradientAggregationReconciler{
+        Client: mgr.GetClient(),
+        Scheme: mgr.GetScheme(),
+    }).SetupWithManager(mgr); err != nil {
+        setupLog.Error(err, "unable to create controller",
+            "controller", "GradientAggregation")
+        os.Exit(1)
+    }
 
-	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		setupLog.Error(err, "problem running manager")
-		os.Exit(1)
-	}
+    setupLog.Info("starting manager")
+    if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+        setupLog.Error(err, "problem running manager")
+        os.Exit(1)
+    }
 }

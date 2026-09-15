@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ebpf-p4-results
+  namespace: default
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ebpf-p4-ablation
+  namespace: default
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 20          # 45 min hard limit
+  template:
+    spec:
+      restartPolicy: Never
+      hostNetwork: true
+      containers:
+      - name: runner
+        image: ebpf-p4-agg:latest
+        imagePullPolicy: Never
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          set -e
+          cd /app
+
+          # Flat layout that the host-side copy and plotter expect
+          mkdir -p /results
+          rm -rf benchmarks/results
+          ln -sfn /results benchmarks/results
+          mkdir -p benchmarks/results/ablation
+
+          free_port() {
+            fuser -k -KILL 9999/udp 2>/dev/null || true
+            pkill -KILL -f 'userspace_aggregator' 2>/dev/null || true
+            pkill -KILL -f 'echo_aggregator' 2>/dev/null || true
+            pkill -KILL -f 'python3.*aggregator' 2>/dev/null || true
+            sleep 2
+          }
+
+          echo "========== Full 11-config ablation =========="
+          free_port
+
+          # Use the same harness that already works on the host
+          if [ -x benchmarks/ablation/run_ablation.sh ]; then
+            bash benchmarks/ablation/run_ablation.sh
+          else
+            # Fallback: call run_one_ablation for each config
+            for cfg in A1 A2 A3 A4 A5-pkt16 A5-pkt32 A5-pkt64 A6-w1 A6-w2 A6-w4 A6-w8; do
+              free_port
+              echo ">>> $cfg"
+              bash benchmarks/ablation/run_one_ablation.sh $cfg || true
+            done
+            python3 benchmarks/ablation/combine_results.py || true
+            python3 benchmarks/analysis/plot_ablation.py \
+                --input  benchmarks/results/ablation \
+                --output benchmarks/results/ablation || true
+          fi
+
+          echo "========== Final tree under /results =========="
+          find /results -type f | sort
+          echo "ABLATION JOB FINISHED"
+        volumeMounts:
+        - name: results
+          mountPath: /results
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2"
+      volumes:
+      - name: results
+        persistentVolumeClaim:
+          claimName: ebpf-p4-results

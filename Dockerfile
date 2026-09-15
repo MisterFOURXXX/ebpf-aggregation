@@ -1,44 +1,39 @@
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV DEBCONF_NONINTERACTIVE_SEEN=true
 
-# Install apt-utils first to avoid debconf warnings
-RUN apt-get update -qq 2>/dev/null >/dev/null && \
-    apt-get install -y -qq apt-utils 2>/dev/null >/dev/null
-
-# Install all build dependencies (arch-agnostic)
-RUN apt-get update -qq 2>/dev/null >/dev/null && \
+# Base packages: build toolchain + runtime tools the harness needs.
+RUN apt-get update -qq && \
     apt-get install -y -qq --no-install-recommends \
-    make gcc g++ clang llvm libbpf-dev \
-    linux-tools-common linux-libc-dev \
-    cmake python3 python3-pip \
-    2>/dev/null >/dev/null && \
-    rm -rf /var/lib/apt/lists/*
-
-# Fix asm/types.h for both x86_64 and aarch64
-RUN ARCH=$(uname -m) && \
-    if [ "$ARCH" = "aarch64" ]; then DEB_ARCH="aarch64"; else DEB_ARCH="x86_64"; fi && \
-    mkdir -p /usr/include/asm && \
-    ln -sf /usr/include/${DEB_ARCH}-linux-gnu/asm/types.h /usr/include/asm/types.h 2>/dev/null || true && \
-    ln -sf /usr/include/${DEB_ARCH}-linux-gnu/asm /usr/include/asm 2>/dev/null || true
+        make gcc g++ clang llvm libbpf-dev \
+        linux-tools-common linux-libc-dev \
+        cmake python3 python3-pip \
+        python3-matplotlib python3-numpy \
+        sudo psmisc lsof iproute2 procps \
+        iputils-ping net-tools bash coreutils \
+        dos2unix file \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY . .
 
-RUN chmod +x scripts/*.sh
+# Build the eBPF object.
+RUN make -C ebpf
 
-# Build all with minimal output
-RUN echo "=== Building ===" && \
-    ./scripts/clean_all.sh 2>/dev/null >/dev/null && \
-    (make all 2>&1 >/dev/null | grep -E "error:|fatal error:" || echo "Build OK") && \
-    (cd examples && mkdir -p build && cd build && cmake .. >/dev/null 2>&1 && make 2>&1 >/dev/null | grep -E "error:" || true) && \
-    (cd benchmarks && mkdir -p build && cd build && cmake .. >/dev/null 2>&1 && make 2>&1 >/dev/null | grep -E "error:" || true) && \
-    echo "Build complete"
+# Build the C++ components.
+RUN (cd client_lib && mkdir -p build && cd build && cmake .. >/dev/null && make >/dev/null) && \
+    (cd examples   && mkdir -p build && cd build && cmake .. >/dev/null && make >/dev/null) && \
+    (cd benchmarks && mkdir -p build && cd build && cmake .. >/dev/null && make >/dev/null) && \
+    (cd tests      && mkdir -p build && cd build && cmake .. >/dev/null && make >/dev/null)
 
-RUN echo "=== Testing ===" && \
-    cd tests && mkdir -p build && cd build && \
-    cmake .. >/dev/null 2>&1 && make >/dev/null 2>&1 && \
-    (ctest 2>&1 | grep -E "tests passed|tests failed" || echo "Tests run")
+RUN chmod +x scripts/*.sh benchmarks/ablation/*.sh benchmarks/analysis/*.py 2>/dev/null || true
+
+# Sanity check: all runtime tools must be present.
+RUN for t in ss fuser lsof pgrep setsid sudo python3; do \
+        command -v "$t" >/dev/null || { echo "MISSING: $t"; exit 1; }; \
+    done
+
+# Run the unit tests as a final build assertion.
+RUN cd tests/build && ctest --output-on-failure
 
 CMD ["/bin/bash"]

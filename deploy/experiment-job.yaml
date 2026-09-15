@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ebpf-p4-results
+  namespace: default
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ebpf-p4-experiments
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      hostNetwork: true
+      containers:
+      - name: runner
+        image: ebpf-p4-agg:latest
+        imagePullPolicy: Never
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          set -e
+          cd /app
+          mkdir -p /results
+          rm -rf benchmarks/results
+          ln -s /results benchmarks/results
+
+          fuser -k -KILL 9999/udp 2>/dev/null || true
+          pkill -KILL -f '[u]serspace_aggregator' 2>/dev/null || true
+          sleep 1
+
+          bash scripts/run_experiments.sh
+          echo "=== Experiments done ==="
+        volumeMounts:
+        - name: results
+          mountPath: /results
+      volumes:
+      - name: results
+        persistentVolumeClaim:
+          claimName: ebpf-p4-results

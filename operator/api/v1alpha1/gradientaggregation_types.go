@@ -21,11 +21,11 @@ type EBPFPolicy struct {
 }
 
 type GradientAggregationSpec struct {
-	Workers          int32            `json:"workers,omitempty"`
-	AggregationMode  AggregationMode  `json:"aggregationMode,omitempty"`
+	Workers          int32             `json:"workers,omitempty"`
+	AggregationMode  AggregationMode   `json:"aggregationMode,omitempty"`
 	SmartNICSelector *SmartNICSelector `json:"smartNICSelector,omitempty"`
-	EBPFPolicy       *EBPFPolicy      `json:"eBPFPolicy,omitempty"`
-	Metrics          []string         `json:"metrics,omitempty"`
+	EBPFPolicy       *EBPFPolicy       `json:"eBPFPolicy,omitempty"`
+	Metrics          []string          `json:"metrics,omitempty"`
 }
 
 type GradientAggregationStatus struct {

@@ -1,116 +1,174 @@
 #!/bin/bash
 # ============================================================
-#  Run a single ablation configuration
-#  Usage: ./run_one_ablation.sh <config_file>
+# run_one_ablation.sh
+#   args: NAME TYPE WORKERS PKT_FLOATS SIZE1 [SIZE2 ...]
+#
+# Port cleanup strategy (in order):
+#   1. fuser -k 9999/udp   — kills whatever holds the port
+#   2. pkill aggregator    — fallback by process name
+#   3. lsof -iUDP:9999     — last resort
+# Verified with ss before proceeding.
 # ============================================================
 set +m
-set +b
-CONFIG="$1"
-[ -z "$CONFIG" ] && { echo "Usage: $0 <config.conf>"; exit 1; }
-[ ! -f "$CONFIG" ] && { echo "Config not found: $CONFIG"; exit 1; }
-
-source "$CONFIG"
-
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
-OUT="$ROOT/benchmarks/results/ablation/$ABLATION_ID"
+
+NAME=$1; TYPE=$2; WORKERS=$3; PKT_FLOATS=$4; shift 4
+SIZES="$*"
+
+OUT="$ROOT/benchmarks/results/ablation/$NAME"
 mkdir -p "$OUT"
+: > "$OUT/aggregator.log"
+: > "$OUT/latency_results.csv"
+: > "$OUT/scalability_results.csv"
+: > "$OUT/cpu_results.txt"
 
-echo ""
-echo "==== Ablation: $ABLATION_ID - $ABLATION_NAME ===="
-echo "  Type:       $AGGREGATOR_TYPE"
-echo "  Workers:    $NUM_WORKERS"
-echo "  Pkt floats: $PKT_FLOATS"
-echo "  Sizes:      $LATENCY_SIZES"
-echo ""
+printf 'Ablation: %s\n'     "$NAME"
+printf '  Type:       %s\n' "$TYPE"
+printf '  Workers:    %s\n' "$WORKERS"
+printf '  Pkt floats: %s\n' "$PKT_FLOATS"
+printf '  Sizes:      %s\n' "$SIZES"
 
-cat > "$OUT/metadata.txt" << META
-ABLATION_ID=$ABLATION_ID
-ABLATION_NAME=$ABLATION_NAME
-AGGREGATOR_TYPE=$AGGREGATOR_TYPE
-NUM_WORKERS=$NUM_WORKERS
-PKT_FLOATS=$PKT_FLOATS
-LATENCY_SIZES=$LATENCY_SIZES
-TIMESTAMP=$(date -Iseconds)
-META
+port_busy() { ss -lun 2>/dev/null | grep -q ':9999'; }
 
-# ---------- Stop any running aggregators ----------
-stop_agg() {
-    pkill -TERM -f userspace_aggregator 2>/dev/null || true
-    pkill -TERM -f echo_aggregator 2>/dev/null || true
-    sleep 0.5
-    pkill -KILL -f userspace_aggregator 2>/dev/null || true
-    pkill -KILL -f echo_aggregator 2>/dev/null || true
-    wait 2>/dev/null || true
+free_port() {
+    # Primary: kill whatever is bound to UDP 9999
+    fuser -k -KILL 9999/udp 2>/dev/null || true
+    # Secondary: known aggregator names
+    pkill -KILL -f '[u]serspace_aggregator' 2>/dev/null || true
+    pkill -KILL -f '[e]cho_aggregator'      2>/dev/null || true
+    pkill -KILL -f '[x]dp_aggregator'       2>/dev/null || true
+    # Tertiary: lsof-based
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -t -iUDP:9999 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+    fi
 }
-stop_agg
-sleep 1
 
-# ---------- Start aggregator ----------
+wait_port_free() {
+    local i=0
+    while [ $i -lt 20 ]; do
+        port_busy || return 0
+        free_port; sleep 0.5; i=$((i+1))
+    done
+    return 1
+}
+
+wait_port_listening() {
+    local i=0
+    while [ $i -lt 30 ]; do
+        port_busy && return 0
+        sleep 0.5; i=$((i+1))
+    done
+    return 1
+}
+
+free_port
+if ! wait_port_free; then
+    printf '  status=port_busy\n'
+    { printf 'status=port_busy\n'; printf 'type=%s\n'  "$TYPE"
+      printf 'workers=%s\n' "$WORKERS"; printf 'pkt_floats=%s\n' "$PKT_FLOATS"
+      printf 'sizes=%s\n'   "$SIZES"; } > "$OUT/metadata.txt"
+    exit 0
+fi
+
+MULTI=0
+[ "$WORKERS" -gt 1 ] && MULTI=1
+
+LOADER="$ROOT/ebpf/xdp_aggregator"
 AGG_PID=""
-case "$AGGREGATOR_TYPE" in
-  userspace|userspace_grouped)
-      NUM_WORKERS=$NUM_WORKERS \
-      AGG_PORT=9999 \
-      python3 "$AGGREGATOR_SCRIPT" > "$OUT/aggregator.log" 2>&1 &
-      AGG_PID=$!
-      disown
-      ;;
-  ebpf_xdp)
-      sudo bpftool prog load "$ROOT/ebpf/aggregator.bpf.o" \
-           /sys/fs/bpf/xdp_ablation type xdp > "$OUT/aggregator.log" 2>&1 || true
-      sudo bpftool net attach xdp pinned /sys/fs/bpf/xdp_ablation dev lo \
-           >> "$OUT/aggregator.log" 2>&1 || true
-      ;;
-  xdp_pass)
-      if [ ! -f "$ROOT/ebpf/aggregator_pass.bpf.o" ]; then
-          echo "  [A3 skipped] aggregator_pass.bpf.o not found"
-          echo "SKIPPED" > "$OUT/skipped.txt"
-          return 0 2>/dev/null || exit 0
-      fi
-      sudo bpftool prog load "$ROOT/ebpf/aggregator_pass.bpf.o" \
-           /sys/fs/bpf/xdp_ablation_pass type xdp > "$OUT/aggregator.log" 2>&1 || true
-      sudo bpftool net attach xdp pinned /sys/fs/bpf/xdp_ablation_pass dev lo \
-           >> "$OUT/aggregator.log" 2>&1 || true
-      ;;
-  *)
-      echo "Unknown AGGREGATOR_TYPE: $AGGREGATOR_TYPE"
-      exit 1
-      ;;
+GROUPED_ENV="0"
+[ "$TYPE" = "userspace_grouped" ] && GROUPED_ENV="1"
+
+case "$TYPE" in
+    ebpf_xdp|xdp_pass)
+        if [ ! -x "$LOADER" ]; then
+            printf '  status=unavailable\n'
+            printf '  reason: %s not built\n' "$LOADER"
+            { printf 'status=unavailable\n'; printf 'type=%s\n'       "$TYPE"
+              printf 'workers=%s\n'    "$WORKERS"
+              printf 'pkt_floats=%s\n' "$PKT_FLOATS"
+              printf 'sizes=%s\n'      "$SIZES"
+              printf 'reason=no_loader\n'; } > "$OUT/metadata.txt"
+            exit 0
+        fi
+        XDP_MODE=$([ "$TYPE" = "xdp_pass" ] && printf pass || printf native)
+        setsid env NUM_WORKERS=$WORKERS PKT_FLOATS=$PKT_FLOATS XDP_MODE=$XDP_MODE \
+            "$LOADER" > "$OUT/aggregator.log" 2>&1 < /dev/null &
+        AGG_PID=$!
+        ;;
+    userspace|userspace_grouped)
+        setsid env NUM_WORKERS=$WORKERS PKT_FLOATS=$PKT_FLOATS \
+            GROUPED=$GROUPED_ENV TYPE=$TYPE \
+            python3 "$ROOT/benchmarks/ablation/userspace_aggregator_silent.py" \
+            > "$OUT/aggregator.log" 2>&1 < /dev/null &
+        AGG_PID=$!
+        ;;
+    *)
+        printf '  status=unknown_type\n'
+        printf 'status=unknown_type\n' > "$OUT/metadata.txt"
+        exit 0
+        ;;
 esac
 
-sleep 2
+if ! wait_port_listening; then
+    printf '  status=failed_start\n'
+    printf '  see %s/aggregator.log\n' "$OUT"
+    { printf 'status=failed_start\n'; printf 'type=%s\n'       "$TYPE"
+      printf 'workers=%s\n'    "$WORKERS"
+      printf 'pkt_floats=%s\n' "$PKT_FLOATS"
+      printf 'sizes=%s\n'      "$SIZES"; } > "$OUT/metadata.txt"
+    printf '  --- aggregator.log tail ---\n'
+    tail -5 "$OUT/aggregator.log" 2>/dev/null | sed 's/^/    /'
+    kill -KILL "$AGG_PID" >/dev/null 2>&1 || true
+    exit 0
+fi
 
-# ---------- Run benchmarks ----------
-echo "  Running latency benchmark"
-(cd "$ROOT/benchmarks/build" && \
-    timeout 60 ./latency_benchmark 127.0.0.1 9999 0 \
-    > "$OUT/latency_results.csv" 2>&1 || true)
+printf '  status=ok\n'
+{ printf 'status=ok\n'; printf 'type=%s\n'       "$TYPE"
+  printf 'workers=%s\n'    "$WORKERS"
+  printf 'pkt_floats=%s\n' "$PKT_FLOATS"
+  printf 'sizes=%s\n'      "$SIZES"
+  printf 'pid=%s\n'        "$AGG_PID"; } > "$OUT/metadata.txt"
 
-echo "  Running scalability benchmark"
-(cd "$ROOT/benchmarks/build" && \
-    timeout 30 ./scalability_benchmark 127.0.0.1 9999 2 \
-    > "$OUT/scalability_results.csv" 2>&1 || true)
+if [ "$MULTI" -eq 1 ]; then
+    printf '  latency (skipped: multi-worker)\n'
+    printf 'size_bytes,mean_us,median_us,p95_us,trimmed_mean_us\n' \
+        > "$OUT/latency_results.csv"
+    printf 'latency_skipped=multi-worker\n' >> "$OUT/metadata.txt"
+else
+    printf '  latency\n'
+    [ -x "$ROOT/benchmarks/build/latency_benchmark" ] && \
+        (cd "$ROOT/benchmarks/build" && \
+         timeout 180 ./latency_benchmark 127.0.0.1 9999 0) \
+            > "$OUT/latency_results.csv" 2>/dev/null || true
+fi
 
-echo "  Running CPU benchmark"
-(cd "$ROOT/benchmarks/build" && \
-    timeout 20 ./cpu_benchmark 127.0.0.1 9999 0 $AGG_PID \
-    > "$OUT/cpu_results.txt" 2>&1 || true)
+printf '  scalability\n'
+[ -x "$ROOT/benchmarks/build/scalability_benchmark" ] && \
+    (cd "$ROOT/benchmarks/build" && \
+     timeout 90 ./scalability_benchmark 127.0.0.1 9999 "$WORKERS") \
+        > "$OUT/scalability_results.csv" 2>/dev/null || true
 
-# ---------- Stop aggregator ----------
-case "$AGGREGATOR_TYPE" in
-  ebpf_xdp)
-      sudo bpftool net detach xdp dev lo 2>/dev/null || true
-      sudo rm -f /sys/fs/bpf/xdp_ablation 2>/dev/null || true
-      ;;
-  xdp_pass)
-      sudo bpftool net detach xdp dev lo 2>/dev/null || true
-      sudo rm -f /sys/fs/bpf/xdp_ablation_pass 2>/dev/null || true
-      ;;
-  *)
-      stop_agg
-      ;;
-esac
+if [ "$MULTI" -eq 1 ]; then
+    printf '  cpu (skipped: multi-worker)\n'
+    printf 'cpu_skipped=multi-worker\n' >> "$OUT/metadata.txt"
+else
+    printf '  cpu\n'
+    [ -x "$ROOT/benchmarks/build/cpu_benchmark" ] && \
+        (cd "$ROOT/benchmarks/build" && \
+         timeout 40 ./cpu_benchmark 127.0.0.1 9999 0 "$AGG_PID") \
+            > "$OUT/cpu_results.txt" 2>/dev/null || true
+fi
 
-echo "  Results: $OUT"
-ls "$OUT" | sed 's/^/    /'
+kill -TERM "$AGG_PID" >/dev/null 2>&1 || true
+sleep 1
+kill -KILL "$AGG_PID" >/dev/null 2>&1 || true
+free_port
+wait_port_free || true
+
+if [ "$TYPE" = "ebpf_xdp" ] || [ "$TYPE" = "xdp_pass" ]; then
+    rm -rf /sys/fs/bpf/xdp_aggregator /sys/fs/bpf/xdp_aggregator_pass 2>/dev/null || true
+fi
+
+ROWS=$(grep -cE '^[0-9]' "$OUT/latency_results.csv" 2>/dev/null) || ROWS=0
+printf '  latency rows: %s\n' "$ROWS"

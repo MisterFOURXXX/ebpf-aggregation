@@ -16,13 +16,13 @@ metadata:
 rules:
 - apiGroups: ["mlaccel.io"]
   resources: ["gradientaggregations", "gradientaggregations/status"]
-  verbs: ["get","list","watch","create","update","patch","delete"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: ["apps"]
   resources: ["daemonsets"]
-  verbs: ["get","list","watch"]
+  verbs: ["get", "list", "watch"]
 - apiGroups: [""]
-  resources: ["pods","services"]
-  verbs: ["get","list","watch"]
+  resources: ["pods", "services"]
+  verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -55,6 +55,15 @@ spec:
       serviceAccountName: ebpf-p4-operator
       containers:
       - name: manager
-        image: ebpf-p4-agg:latest
+        image: ebpf-p4-operator:latest
         imagePullPolicy: IfNotPresent
-        command: ["/bin/bash", "-c", "sleep 3600"]
+        command: ["/manager"]
+        args:
+        - --leader-elect=false
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi

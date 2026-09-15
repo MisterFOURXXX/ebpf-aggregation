@@ -1,0 +1,29 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts (the source of the CMakeCache error)
+**/build/
+**/build/**/*
+**/CMakeCache.txt
+**/CMakeFiles/
+**/*.o
+**/*.so
+**/*.bpf.o
+
+# Python caches
+**/__pycache__/
+**/*.pyc
+
+# Experiment results and plots
+benchmarks/results/
+benchmarks/analysis/*.png
+
+# Kubernetes/Go artifacts
+operator/bin/
+operator/go.sum
+
+# Editor/temp files
+*.swp
+*~
+.DS_Store

@@ -1,9 +1,6 @@
 #!/bin/bash
 # ============================================================
-# deploy.sh - UNIFIED Kubernetes deployment:
-#   1. Create KIND cluster
-#   2. Install bpfd daemonset
-#   3. Build + deploy the Operator
+# deploy.sh - KIND cluster + bpfd + Operator
 # ============================================================
 set -e
 cd "$(dirname "$0")/.."
@@ -11,12 +8,23 @@ ROOT=$(pwd)
 CLUSTER=${CLUSTER:-ebpf-p4}
 IMG=${IMG:-ebpf-p4-operator:latest}
 
-echo "=============================================="
-echo "   Deploy: KIND + bpfd + Operator"
-echo "=============================================="
+printf '==============================================\n'
+printf '   Deploy: KIND + bpfd + Operator\n'
+printf '==============================================\n'
+printf '  Cluster: %s\n' "$CLUSTER"
+printf '  Image:   %s\n\n' "$IMG"
 
-# --- 1. Create KIND cluster ---
-echo "[1/3] Creating KIND cluster '$CLUSTER'..."
+# --- 0. Sanity check: image must build before we create a cluster ---
+printf '[0/3] Building operator image first\n'
+(cd "$ROOT/operator" && make docker-build IMG="$IMG") || {
+    printf '\n[ERROR] Operator image build FAILED.\n'
+    printf 'Diagnose with:\n'
+    printf '  cd %s/operator && make docker-build IMG=%s\n' "$ROOT" "$IMG"
+    exit 1
+}
+
+# --- 1. KIND cluster ---
+printf '\n[1/3] KIND cluster %s\n' "$CLUSTER"
 if ! kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
     kind create cluster --name "$CLUSTER" --config - <<EOF
 kind: Cluster
@@ -27,27 +35,27 @@ nodes:
 - role: worker
 EOF
 else
-    echo "  Cluster '$CLUSTER' already exists."
+    printf '  Cluster already exists\n'
 fi
 
-# --- 2. Install bpfd ---
-echo "[2/3] Installing bpfd..."
+# --- 2. bpfd (optional) ---
+printf '\n[2/3] bpfd DaemonSet (optional)\n'
 kubectl create namespace bpfd 2>/dev/null || true
-kubectl apply -f deploy/bpfd-daemonset.yaml
-kubectl rollout status daemonset/bpfd -n bpfd --timeout=60s || \
-    echo "  [warn] bpfd rollout timed out (may still be starting)"
+kubectl apply -f "$ROOT/deploy/bpfd-daemonset.yaml"
+if ! kubectl rollout status daemonset/bpfd -n bpfd --timeout=60s 2>/dev/null; then
+    printf '  [warn] bpfd did not become Ready (expected on KIND)\n'
+    printf '  [warn] Continuing without bpfd\n'
+fi
 
-# --- 3. Build and deploy Operator ---
-echo "[3/3] Building and deploying Operator..."
-cd "$ROOT/operator"
-make docker-build IMG="$IMG"
+# --- 3. Operator ---
+printf '\n[3/3] Loading image and deploying operator\n'
 kind load docker-image "$IMG" --name "$CLUSTER"
-make deploy
-cd "$ROOT"
+kubectl apply -f "$ROOT/operator/config/crd/mlaccel.io_gradientaggregations.yaml"
+kubectl apply -f "$ROOT/deploy/operator.yaml"
+kubectl apply -f "$ROOT/operator/config/sample/gradientaggregation.yaml"
 
-echo ""
-echo "--- Status ---"
+sleep 5
+printf '\n--- Status ---\n'
 kubectl get pods -n mlaccel-system 2>/dev/null || true
-kubectl get pods -n bpfd 2>/dev/null || true
-echo ""
-echo "Deploy complete."
+kubectl get gradientaggregations -A 2>/dev/null || true
+printf '\nDeploy complete.\n'
