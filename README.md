@@ -1,5 +1,4 @@
 # eBPF Gradient Aggregation for Distributed Machine Learning  
-*(P4 / SmartNIC offload is a documented future extension only)*
 
 ### 1. Introduction
 
