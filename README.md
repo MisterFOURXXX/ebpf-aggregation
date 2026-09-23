@@ -1,7 +1,5 @@
 # eBPF Gradient Aggregation for Distributed Machine Learning  
 
-# eBPF Gradient Aggregation for Distributed Machine Learning
-
 > An end-to-end, reproducible systems research repository that benchmarks AllReduce gradient 
 > aggregation across three execution contexts: a standard userspace daemon (baseline), an 
 > **eBPF/XDP kernel-bypass program** (experimental treatment), and an echo server (control). 
