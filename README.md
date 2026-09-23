@@ -1,5 +1,22 @@
 # eBPF Gradient Aggregation for Distributed Machine Learning  
 
+# eBPF Gradient Aggregation for Distributed Machine Learning
+
+> An end-to-end, reproducible systems research repository that benchmarks AllReduce gradient 
+> aggregation across three execution contexts: a standard userspace daemon (baseline), an 
+> **eBPF/XDP kernel-bypass program** (experimental treatment), and an echo server (control). 
+> It demonstrates how to achieve hardware-offload-like performance for distributed training 
+> using only commodity Linux software — eliminating expensive kernel-to-userspace transitions 
+> without requiring specialized SmartNICs or programmable switches.
+
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Linux Kernel](https://img.shields.io/badge/linux--kernel-5.15%2B-black.svg)](https://www.kernel.org/)
+[![eBPF](https://img.shields.io/badge/eBPF-XDP-orange.svg)](https://ebpf.io/)
+[![C](https://img.shields.io/badge/C-lang-00599C.svg)](https://en.wikipedia.org/wiki/C_(programming_language))
+[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
+[![Kubernetes](https://img.shields.io/badge/kubernetes-operator-326CE5.svg)](https://kubernetes.io/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 ### 1. Introduction
 
 Imagine large AI models are trained — like ChatGPT, but smaller — across 8 computers instead of 1. Every time the model learns something, all 8 computers must agree on what they learned before moving forward. They do this by sending their “learning updates” (called gradients) to each other and adding them up. This process is called AllReduce.
