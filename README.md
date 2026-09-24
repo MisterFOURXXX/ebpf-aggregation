@@ -15,6 +15,67 @@
 [![Kubernetes](https://img.shields.io/badge/kubernetes-operator-326CE5.svg)](https://kubernetes.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+---
+
+## Table of Contents
+
+- **1. Introduction**
+  - 1.1 Existing Solutions
+  - 1.2 eBPF
+- **2. Project Motivation**
+  - 2.1 Economic
+  - 2.2 Accessibility
+  - 2.3 Scientific
+- **3. Foundations**
+  - 3.1 Data-parallel Training
+  - 3.2 AllReduce Bottleneck
+  - 3.3 The Linux Network Stack
+  - 3.4 Kernel Bypass
+  - 3.5 eBPF Virtual Machine
+  - 3.6 Hook Points
+  - 3.7 BPF Maps
+  - 3.8 UDP Transport
+  - 3.9 Loopback
+  - 3.10 The Two-Port Model
+  - 3.11 The SwitchML Lineage
+  - 3.12 The ALEPH Lineage
+  - 3.13 The Portability Gap
+  - 3.14 Where the Project Sits
+  - 3.15 One-Factor-at-a-Time
+  - 3.16 Controls
+  - 3.17 The Trimmed Mean
+- **4. Design Approach**
+  - 4.1 The Wire Protocol
+  - 4.2 Design and Implementation Variants
+    - 4.2.1 userspace — the baseline
+    - 4.2.2 ebpf_xdp — the treatment
+    - 4.2.3 xdp_pass — the kernel control
+    - 4.2.4 udp_echo — the aggregation control
+- **5. Evaluation (Host Measurements)**
+  - 5.1 Experiment Results
+    - Experiment 1 – Simple AllReduce
+    - Experiment 2 – Latency versus Payload Size
+    - Experiment 3 – Scalability
+    - Experiment 4 – Aggregator CPU Utilisation
+  - 5.2 Ablation Study Interpretation
+    - Coverage Summary
+    - What each group tells us
+    - Per-config ablation study workflow
+    - Master ablation study workflow
+- **6. Key Findings**
+  - Limitations
+- **7. Summary**
+- **8. Suggested Next Steps**
+- **Get Start – Reproducibility (operational commands)**
+  - Docker and Kubernetes Related to the Project
+    - What Docker is for in this project?
+    - What Kubernetes is for in this project?
+  - Host workflow (recommended)
+  - Kubernetes fast pre-flight (≈ 3 min) before any long ablation
+- **About**
+
+---
+
 ### 1. Introduction
 
 Imagine large AI models are trained — like ChatGPT, but smaller — across 8 computers instead of 1. Every time the model learns something, all 8 computers must agree on what they learned before moving forward. They do this by sending their “learning updates” (called gradients) to each other and adding them up. This process is called AllReduce.
